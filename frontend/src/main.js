@@ -366,6 +366,7 @@ function mergeExtracts(parts) {
 }
 
 function render() {
+  closeMobileNav();
   const root = $("#app");
   const m = state.metrics;
   const trades = state.trades;
@@ -456,27 +457,23 @@ function render() {
         : "text-slate-300 hover:bg-slate-800/90"
     }">${label}</button>`;
   };
-  const navTab = (page, label) => {
-    const active = state.page === page;
-    return `<button type="button" data-nav-page="${page}" class="min-h-[48px] rounded-lg text-sm font-medium transition-colors ${
-      active
-        ? "bg-slate-800 text-white shadow-sm"
-        : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/60"
-    }">${label}</button>`;
-  };
-
   root.innerHTML = `
     <div class="min-h-screen flex">
     <aside class="hidden md:flex w-56 lg:w-64 shrink-0 min-h-screen self-stretch flex-col bg-slate-900 border-r border-slate-700 p-3 lg:p-4 text-sm text-slate-300">
       ${navBtn("dashboard", "Dashboard")}
       ${navBtn("calendar", "Calendar")}
     </aside>
-    <div class="flex-1 min-w-0 flex flex-col min-h-screen pb-[calc(3.5rem+env(safe-area-inset-bottom,0px))] md:pb-0">
+    <div class="flex-1 min-w-0 flex flex-col min-h-screen">
     <header class="border-b border-slate-800/80 bg-surface-raised/50 backdrop-blur-sm sticky top-0 z-30 pt-[env(safe-area-inset-top,0px)]">
-      <div class="max-w-7xl mx-auto px-3 sm:px-4 py-3 sm:py-4 flex flex-wrap items-center justify-between gap-3">
-        <div class="min-w-0">
-          <h1 class="text-lg sm:text-xl font-semibold tracking-tight text-white">TradeTracker</h1>
-          <p class="text-xs sm:text-sm text-slate-500 mt-0.5 leading-snug">Same-day round trips · long &amp; short · no fees in P&amp;L</p>
+      <div class="max-w-7xl mx-auto px-3 sm:px-4 py-3 sm:py-4 flex flex-wrap items-center justify-between gap-2 sm:gap-3">
+        <div class="flex items-start gap-2 min-w-0 flex-1">
+          <button type="button" id="mobile-nav-open" class="md:hidden shrink-0 mt-0.5 min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg border border-slate-700/80 bg-surface-overlay text-slate-200 hover:bg-slate-800 active:bg-slate-800 transition-colors" aria-label="Open menu" aria-expanded="false" aria-controls="mobile-nav-panel">
+            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+          </button>
+          <div class="min-w-0">
+            <h1 class="text-lg sm:text-xl font-semibold tracking-tight text-white">TradeTracker</h1>
+            <p class="text-xs sm:text-sm text-slate-500 mt-0.5 leading-snug">Same-day round trips · long &amp; short · no fees in P&amp;L</p>
+          </div>
         </div>
         <label class="cursor-pointer inline-flex items-center justify-center gap-2 min-h-[44px] px-4 py-2 rounded-lg bg-accent/15 text-accent text-sm font-medium hover:bg-accent/25 transition-colors border border-accent/30 shrink-0">
           <input type="file" accept=".csv,text/csv" multiple class="hidden" id="file-input" />
@@ -524,11 +521,21 @@ function render() {
 
 
     </main>
-    <nav class="md:hidden fixed bottom-0 inset-x-0 z-40 grid grid-cols-2 gap-1 px-2 pt-1 border-t border-slate-800 bg-slate-900/95 backdrop-blur-md pb-[max(0.5rem,env(safe-area-inset-bottom,0px))]" aria-label="Primary navigation">
-      ${navTab("dashboard", "Dashboard")}
-      ${navTab("calendar", "Calendar")}
-    </nav>
     </div>
+    </div>
+
+    <div class="md:hidden" id="mobile-nav-shell" aria-hidden="true">
+      <div id="mobile-nav-backdrop" class="fixed inset-0 z-[45] bg-black/60 opacity-0 pointer-events-none transition-opacity duration-200 ease-out" aria-hidden="true"></div>
+      <div id="mobile-nav-panel" class="fixed left-0 top-0 bottom-0 z-[46] flex w-[min(17.5rem,86vw)] max-w-[300px] -translate-x-full flex-col border-r border-slate-700 bg-slate-900 shadow-2xl transition-transform duration-200 ease-out pt-[env(safe-area-inset-top,0px)] pb-[max(1rem,env(safe-area-inset-bottom,0px))]" role="dialog" aria-modal="true" aria-labelledby="mobile-nav-title" aria-hidden="true">
+        <div class="flex items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
+          <h2 id="mobile-nav-title" class="text-sm font-semibold text-slate-200">Menu</h2>
+          <button type="button" id="mobile-nav-close" class="min-h-[44px] min-w-[44px] shrink-0 rounded-lg text-lg leading-none text-slate-400 hover:bg-slate-800 hover:text-white transition-colors" aria-label="Close menu">&times;</button>
+        </div>
+        <nav class="flex flex-col gap-1 p-3" aria-label="Primary navigation">
+          ${navBtn("dashboard", "Dashboard")}
+          ${navBtn("calendar", "Calendar")}
+        </nav>
+      </div>
     </div>
 
     <div id="meta-popover" class="fixed z-[70] hidden pointer-events-none max-w-[280px]"></div>
@@ -752,6 +759,39 @@ function closeTradeRowMenu() {
   tradeMenuTradeId = null;
 }
 
+function openMobileNav() {
+  if (window.matchMedia("(min-width: 768px)").matches) return;
+  const backdrop = $("#mobile-nav-backdrop");
+  const panel = $("#mobile-nav-panel");
+  const shell = $("#mobile-nav-shell");
+  const openBtn = $("#mobile-nav-open");
+  if (!backdrop || !panel) return;
+  backdrop.classList.remove("opacity-0", "pointer-events-none");
+  backdrop.classList.add("opacity-100");
+  backdrop.setAttribute("aria-hidden", "false");
+  panel.classList.remove("-translate-x-full");
+  panel.setAttribute("aria-hidden", "false");
+  shell?.setAttribute("aria-hidden", "false");
+  openBtn?.setAttribute("aria-expanded", "true");
+  document.body.style.overflow = "hidden";
+}
+
+function closeMobileNav() {
+  const backdrop = $("#mobile-nav-backdrop");
+  const panel = $("#mobile-nav-panel");
+  const shell = $("#mobile-nav-shell");
+  const openBtn = $("#mobile-nav-open");
+  document.body.style.overflow = "";
+  if (!backdrop || !panel) return;
+  backdrop.classList.add("opacity-0", "pointer-events-none");
+  backdrop.classList.remove("opacity-100");
+  backdrop.setAttribute("aria-hidden", "true");
+  panel.classList.add("-translate-x-full");
+  panel.setAttribute("aria-hidden", "true");
+  shell?.setAttribute("aria-hidden", "true");
+  openBtn?.setAttribute("aria-expanded", "false");
+}
+
 function positionTradeRowMenu(anchorBtn) {
   const m = $("#trade-row-menu");
   if (!m || !anchorBtn) return;
@@ -937,6 +977,10 @@ function bind() {
     $("#modal-preview")?.classList.remove("hidden");
     $("#modal-clear-shot")?.classList.remove("hidden");
   });
+
+  $("#mobile-nav-open")?.addEventListener("click", () => openMobileNav());
+  $("#mobile-nav-close")?.addEventListener("click", () => closeMobileNav());
+  $("#mobile-nav-backdrop")?.addEventListener("click", () => closeMobileNav());
 }
 
 function paintCharts() {
@@ -1163,6 +1207,7 @@ let modalCurrentId = null;
 
 async function openModal(tradeId) {
   closeMetaPopover();
+  closeMobileNav();
   const t = state.trades.find((x) => x.id === tradeId);
   if (!t) return;
   state.detailTrade = t;
@@ -1302,6 +1347,7 @@ document.querySelector("#app")?.addEventListener("click", (event) => {
   if (!btn) return;
   const page = btn.dataset.navPage;
   if (page !== "dashboard" && page !== "calendar") return;
+  closeMobileNav();
   state.page = page;
   render();
 });
@@ -1310,8 +1356,18 @@ document.addEventListener("click", onGlobalClickForTradeMenu);
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   const menu = $("#trade-row-menu");
-  if (menu && !menu.classList.contains("hidden")) closeTradeRowMenu();
+  if (menu && !menu.classList.contains("hidden")) {
+    closeTradeRowMenu();
+    return;
+  }
+  const mPanel = $("#mobile-nav-panel");
+  if (mPanel && !mPanel.classList.contains("-translate-x-full")) {
+    closeMobileNav();
+  }
 });
-window.addEventListener("resize", () => closeTradeRowMenu());
+window.addEventListener("resize", () => {
+  closeTradeRowMenu();
+  if (window.matchMedia("(min-width: 768px)").matches) closeMobileNav();
+});
 
 render();
