@@ -29,6 +29,7 @@ let state = {
   detailTrade: null,
   tradeMetaById: new Map(),
   screenshotUrls: new Map(),
+  page: "trades",
 };
 
 let metaPopoverHideTimer = null;
@@ -226,6 +227,12 @@ function render() {
           .sort((a, b) => a.closeTs - b.closeTs);
 
   root.innerHTML = `
+    <div class="min-h-screen flex">
+    <aside class="w-64 shrink-0 min-h-screen self-stretch bg-slate-900 border-r border-slate-700 p-4 text-sm text-slate-300">
+      <button type="button" class="w-full text-left px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/90 transition-colors" data-nav-page="dashboard">Dashboard</button>
+      <button type="button" class="w-full text-left px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/90 transition-colors" data-nav-page="trades">Trades</button>
+    </aside>
+    <div class="flex-1 min-w-0 flex flex-col min-h-screen">
     <header class="border-b border-slate-800/80 bg-surface-raised/50 backdrop-blur-sm sticky top-0 z-30">
       <div class="max-w-7xl mx-auto px-4 py-4 flex flex-wrap items-center justify-between gap-4">
         <div>
@@ -241,6 +248,7 @@ function render() {
 
     <main class="max-w-7xl mx-auto px-4 py-8 space-y-10">
       <p class="text-sm text-slate-500" id="file-status">${state.filesLabel}</p>
+      <p class="text-xs text-slate-600 font-mono mb-2">Page: <span class="text-slate-400">${state.page}</span> (remove this line when you’re done checking)</p>
 
       <section class="grid sm:grid-cols-2 lg:grid-cols-5 gap-4" id="stat-cards">
         ${statCard("Counted trades", m ? String(m.tradeCount) : "—")}
@@ -306,6 +314,8 @@ function render() {
         </div>
       </section>
     </main>
+    </div>
+    </div>
 
     <div id="meta-popover" class="fixed z-[70] hidden pointer-events-none max-w-[280px]"></div>
 
@@ -351,6 +361,8 @@ function render() {
   paintCharts();
   paintCalendar();
 }
+
+
 
 function statCard(title, value, hint = "") {
   return `
@@ -916,6 +928,16 @@ async function saveModal() {
     );
   }
 }
+
+/** Sidebar nav: one listener on #app so it survives every `render()` (buttons are recreated each time). */
+document.querySelector("#app")?.addEventListener("click", (event) => {
+  const btn = event.target.closest("[data-nav-page]");
+  if (!btn) return;
+  const page = btn.dataset.navPage;
+  if (page !== "dashboard" && page !== "trades") return;
+  state.page = page;
+  render();
+});
 
 document.addEventListener("click", onGlobalClickForTradeMenu);
 document.addEventListener("keydown", (e) => {
