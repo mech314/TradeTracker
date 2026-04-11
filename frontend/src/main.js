@@ -29,7 +29,7 @@ let state = {
   detailTrade: null,
   tradeMetaById: new Map(),
   screenshotUrls: new Map(),
-  page: "trades",
+  page: "dashboard",
 };
 
 let metaPopoverHideTimer = null;
@@ -226,11 +226,66 @@ function render() {
           .filter((t) => t.dateKey === dayFilter)
           .sort((a, b) => a.closeTs - b.closeTs);
 
+  const dashboardStatsHtml = `
+    <section class="grid sm:grid-cols-2 lg:grid-cols-5 gap-4" id="stat-cards">
+      ${statCard("Counted trades", m ? String(m.tradeCount) : "—")}
+      ${statCard("Win rate", m ? formatPct(m.winRate) : "—", "Breakeven counts as loss")}
+      ${statCard("Profit factor", m ? formatPF(m.profitFactor) : "—")}
+      ${statCard("Avg return per dollar", m ? formatPct(m.avgReturnPerDollar) : "—", "Mean of each trade’s P&amp;L ÷ (½ × sum of |fill amounts|)")}
+      ${statCard("Total P&amp;L", m ? formatUsd(m.totalPnl) : "—")}
+    </section>`;
+
+  const calendarHtml = `
+    <section class="rounded-xl border border-slate-800 bg-surface-raised p-4">
+          <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
+            <h2 class="text-sm font-medium text-slate-400">Calendar</h2>
+            <div class="flex items-center gap-2">
+              <button type="button" id="cal-prev" class="px-3 py-1.5 rounded-lg bg-surface-overlay text-sm text-slate-300 hover:bg-slate-800">←</button>
+              <span class="text-sm text-slate-300 min-w-[9rem] text-center" id="cal-label"></span>
+              <button type="button" id="cal-next" class="px-3 py-1.5 rounded-lg bg-surface-overlay text-sm text-slate-300 hover:bg-slate-800">→</button>
+              ${state.selectedDay ? `<button type="button" id="cal-clear" class="text-xs text-accent ml-2">Clear day</button>` : ""}
+            </div>
+          </div>
+          <div class="overflow-x-auto -mx-1 px-1">
+            <div id="calendar-grid" class="space-y-2 text-sm min-w-[640px]"></div>
+          </div>
+        </section>
+
+        <section class="rounded-xl border border-slate-800 bg-surface-raised overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-800 flex flex-wrap justify-between gap-2">
+            <h2 class="text-sm font-medium text-slate-400">Trades</h2>
+            <span class="text-xs text-slate-500">${dayFilter ? `Day: ${dayFilter} · sorted by close time` : "All days"} · ${filtered.length} shown</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm min-w-[1000px]">
+              <thead class="text-left text-slate-500 border-b border-slate-800">
+                <tr>
+                  <th class="px-3 py-2 font-medium">Date</th>
+                  <th class="px-3 py-2 font-medium">Closed</th>
+                  <th class="px-3 py-2 font-medium">Symbol</th>
+                  <th class="px-3 py-2 font-medium">Side</th>
+                  <th class="px-3 py-2 font-medium text-right cursor-help" title="Peak shares held during the trade. Tooltip on cell shows round-turn share volume.">Shares</th>
+                  <th class="px-3 py-2 font-medium text-right cursor-help" title="Dollar risk per share (e.g. distance to stop). Total risk = this × peak shares.">Risk/sh $</th>
+                  <th class="px-3 py-2 font-medium text-right cursor-help" title="Risk/sh × peak shares, when risk/sh is set.">Total risk</th>
+                  <th class="px-3 py-2 font-medium text-right">P&amp;L</th>
+                  <th class="px-3 py-2 font-medium text-right cursor-help underline decoration-slate-600 decoration-dotted underline-offset-4" title="This trade’s P&amp;L divided by half the sum of absolute fill amounts (same basis as “Avg return per dollar”).">Return / $</th>
+                  <th class="px-3 py-2 font-medium">Result</th>
+                  <th class="px-3 py-2 font-medium text-center cursor-help" title="Hover for note and screenshot preview.">Notes</th>
+                  <th class="px-2 py-2 font-medium text-right w-10"><span class="sr-only">Options</span></th>
+                </tr>
+              </thead>
+              <tbody id="trades-tbody" class="divide-y divide-slate-800/80">
+                ${filtered.map((t) => tradeRowHtml(t)).join("")}
+              </tbody>
+            </table>
+          </div>
+        </section>`;
+
   root.innerHTML = `
     <div class="min-h-screen flex">
     <aside class="w-64 shrink-0 min-h-screen self-stretch bg-slate-900 border-r border-slate-700 p-4 text-sm text-slate-300">
       <button type="button" class="w-full text-left px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/90 transition-colors" data-nav-page="dashboard">Dashboard</button>
-      <button type="button" class="w-full text-left px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/90 transition-colors" data-nav-page="trades">Trades</button>
+      <button type="button" class="w-full text-left px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/90 transition-colors" data-nav-page="calendar">Calendar</button>
     </aside>
     <div class="flex-1 min-w-0 flex flex-col min-h-screen">
     <header class="border-b border-slate-800/80 bg-surface-raised/50 backdrop-blur-sm sticky top-0 z-30">
@@ -248,15 +303,8 @@ function render() {
 
     <main class="max-w-7xl mx-auto px-4 py-8 space-y-10">
       <p class="text-sm text-slate-500" id="file-status">${state.filesLabel}</p>
-      <p class="text-xs text-slate-600 font-mono mb-2">Page: <span class="text-slate-400">${state.page}</span> (remove this line when you’re done checking)</p>
 
-      <section class="grid sm:grid-cols-2 lg:grid-cols-5 gap-4" id="stat-cards">
-        ${statCard("Counted trades", m ? String(m.tradeCount) : "—")}
-        ${statCard("Win rate", m ? formatPct(m.winRate) : "—", "Breakeven counts as loss")}
-        ${statCard("Profit factor", m ? formatPF(m.profitFactor) : "—")}
-        ${statCard("Avg return per dollar", m ? formatPct(m.avgReturnPerDollar) : "—", "Mean of each trade’s P&amp;L ÷ (½ × sum of |fill amounts|)")}
-        ${statCard("Total P&amp;L", m ? formatUsd(m.totalPnl) : "—")}
-      </section>
+      ${state.page === "dashboard" ? dashboardStatsHtml : ""}
 
       <section class="grid lg:grid-cols-2 gap-6">
         <div class="rounded-xl border border-slate-800 bg-surface-raised p-4">
@@ -269,50 +317,9 @@ function render() {
         </div>
       </section>
 
-      <section class="rounded-xl border border-slate-800 bg-surface-raised p-4">
-        <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
-          <h2 class="text-sm font-medium text-slate-400">Calendar</h2>
-          <div class="flex items-center gap-2">
-            <button type="button" id="cal-prev" class="px-3 py-1.5 rounded-lg bg-surface-overlay text-sm text-slate-300 hover:bg-slate-800">←</button>
-            <span class="text-sm text-slate-300 min-w-[9rem] text-center" id="cal-label"></span>
-            <button type="button" id="cal-next" class="px-3 py-1.5 rounded-lg bg-surface-overlay text-sm text-slate-300 hover:bg-slate-800">→</button>
-            ${state.selectedDay ? `<button type="button" id="cal-clear" class="text-xs text-accent ml-2">Clear day</button>` : ""}
-          </div>
-        </div>
-        <div class="overflow-x-auto -mx-1 px-1">
-          <div id="calendar-grid" class="space-y-2 text-sm min-w-[640px]"></div>
-        </div>
-      </section>
+      ${state.page === "calendar" ? calendarHtml : ""}
 
-      <section class="rounded-xl border border-slate-800 bg-surface-raised overflow-hidden">
-        <div class="px-4 py-3 border-b border-slate-800 flex flex-wrap justify-between gap-2">
-          <h2 class="text-sm font-medium text-slate-400">Trades</h2>
-          <span class="text-xs text-slate-500">${dayFilter ? `Day: ${dayFilter} · sorted by close time` : "All days"} · ${filtered.length} shown</span>
-        </div>
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm min-w-[1000px]">
-            <thead class="text-left text-slate-500 border-b border-slate-800">
-              <tr>
-                <th class="px-3 py-2 font-medium">Date</th>
-                <th class="px-3 py-2 font-medium">Closed</th>
-                <th class="px-3 py-2 font-medium">Symbol</th>
-                <th class="px-3 py-2 font-medium">Side</th>
-                <th class="px-3 py-2 font-medium text-right cursor-help" title="Peak shares held during the trade. Tooltip on cell shows round-turn share volume.">Shares</th>
-                <th class="px-3 py-2 font-medium text-right cursor-help" title="Dollar risk per share (e.g. distance to stop). Total risk = this × peak shares.">Risk/sh $</th>
-                <th class="px-3 py-2 font-medium text-right cursor-help" title="Risk/sh × peak shares, when risk/sh is set.">Total risk</th>
-                <th class="px-3 py-2 font-medium text-right">P&amp;L</th>
-                <th class="px-3 py-2 font-medium text-right cursor-help underline decoration-slate-600 decoration-dotted underline-offset-4" title="This trade’s P&amp;L divided by half the sum of absolute fill amounts (same basis as “Avg return per dollar”).">Return / $</th>
-                <th class="px-3 py-2 font-medium">Result</th>
-                <th class="px-3 py-2 font-medium text-center cursor-help" title="Hover for note and screenshot preview.">Notes</th>
-                <th class="px-2 py-2 font-medium text-right w-10"><span class="sr-only">Options</span></th>
-              </tr>
-            </thead>
-            <tbody id="trades-tbody" class="divide-y divide-slate-800/80">
-              ${filtered.map((t) => tradeRowHtml(t)).join("")}
-            </tbody>
-          </table>
-        </div>
-      </section>
+
     </main>
     </div>
     </div>
@@ -934,7 +941,7 @@ document.querySelector("#app")?.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-nav-page]");
   if (!btn) return;
   const page = btn.dataset.navPage;
-  if (page !== "dashboard" && page !== "trades") return;
+  if (page !== "dashboard" && page !== "calendar") return;
   state.page = page;
   render();
 });
