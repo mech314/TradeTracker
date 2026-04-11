@@ -459,7 +459,7 @@ function render() {
   };
   root.innerHTML = `
     <div class="min-h-screen flex">
-    <aside class="hidden md:flex w-56 lg:w-64 shrink-0 min-h-screen self-stretch flex-col bg-slate-900 border-r border-slate-700 p-3 lg:p-4 text-sm text-slate-300">
+    <aside class="hidden lg:flex w-56 lg:w-64 shrink-0 min-h-screen self-stretch flex-col bg-slate-900 border-r border-slate-700 p-3 lg:p-4 text-sm text-slate-300">
       ${navBtn("dashboard", "Dashboard")}
       ${navBtn("calendar", "Calendar")}
     </aside>
@@ -467,8 +467,9 @@ function render() {
     <header class="border-b border-slate-800/80 bg-surface-raised/50 backdrop-blur-sm sticky top-0 z-30 pt-[env(safe-area-inset-top,0px)]">
       <div class="max-w-7xl mx-auto px-3 sm:px-4 py-3 sm:py-4 flex flex-wrap items-center justify-between gap-2 sm:gap-3">
         <div class="flex items-start gap-2 min-w-0 flex-1">
-          <button type="button" id="mobile-nav-open" class="md:hidden shrink-0 mt-0.5 min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg border border-slate-700/80 bg-surface-overlay text-slate-200 hover:bg-slate-800 active:bg-slate-800 transition-colors" aria-label="Open menu" aria-expanded="false" aria-controls="mobile-nav-panel">
-            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+          <button type="button" id="mobile-nav-open" class="flex lg:hidden shrink-0 mt-0.5 min-h-[44px] items-center justify-center gap-2 rounded-lg border border-accent/40 bg-accent/15 px-3 text-accent hover:bg-accent/25 active:bg-accent/20 transition-colors" aria-label="Open menu" aria-expanded="false" aria-controls="mobile-nav-panel">
+            <svg class="w-5 h-5 shrink-0 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+            <span class="text-xs font-semibold tracking-wide">Menu</span>
           </button>
           <div class="min-w-0">
             <h1 class="text-lg sm:text-xl font-semibold tracking-tight text-white">TradeTracker</h1>
@@ -524,7 +525,7 @@ function render() {
     </div>
     </div>
 
-    <div class="md:hidden" id="mobile-nav-shell" aria-hidden="true">
+    <div class="lg:hidden" id="mobile-nav-shell" aria-hidden="true">
       <div id="mobile-nav-backdrop" class="fixed inset-0 z-[45] bg-black/60 opacity-0 pointer-events-none transition-opacity duration-200 ease-out" aria-hidden="true"></div>
       <div id="mobile-nav-panel" class="fixed left-0 top-0 bottom-0 z-[46] flex w-[min(17.5rem,86vw)] max-w-[300px] -translate-x-full flex-col border-r border-slate-700 bg-slate-900 shadow-2xl transition-transform duration-200 ease-out pt-[env(safe-area-inset-top,0px)] pb-[max(1rem,env(safe-area-inset-bottom,0px))]" role="dialog" aria-modal="true" aria-labelledby="mobile-nav-title" aria-hidden="true">
         <div class="flex items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
@@ -760,7 +761,7 @@ function closeTradeRowMenu() {
 }
 
 function openMobileNav() {
-  if (window.matchMedia("(min-width: 768px)").matches) return;
+  if (window.matchMedia("(min-width: 1024px)").matches) return;
   const backdrop = $("#mobile-nav-backdrop");
   const panel = $("#mobile-nav-panel");
   const shell = $("#mobile-nav-shell");
@@ -1367,7 +1368,7 @@ document.addEventListener("keydown", (e) => {
 });
 window.addEventListener("resize", () => {
   closeTradeRowMenu();
-  if (window.matchMedia("(min-width: 768px)").matches) closeMobileNav();
+  if (window.matchMedia("(min-width: 1024px)").matches) closeMobileNav();
 });
 
 render();
