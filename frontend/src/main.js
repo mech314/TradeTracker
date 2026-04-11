@@ -5,7 +5,12 @@ import {
   buildEquitySeries,
 } from "./engine.js";
 import { computeMetrics, formatPct, formatUsd } from "./metrics.js";
-import { renderEquityChart, renderWeekdayChart } from "./charts.js";
+import {
+  renderEquityChart,
+  renderCumulativeReturnSparkline,
+  renderWeekdayChart,
+  destroyChart,
+} from "./charts.js";
 import {
   loadTradeMeta,
   saveTradeMeta,
@@ -39,6 +44,53 @@ let tradeMenuTradeId = null;
 
 function pad2(n) {
   return String(n).padStart(2, "0");
+}
+
+/** First / last `YYYY-MM-DD` date keys for a calendar month (local `y`, `mo`). */
+function monthDateKeyRange(y, mo) {
+  const start = `${y}-${pad2(mo + 1)}-01`;
+  const last = new Date(y, mo + 1, 0).getDate();
+  const end = `${y}-${pad2(mo + 1)}-${pad2(last)}`;
+  return { start, end };
+}
+
+function equitySeriesForMonth(series, y, mo) {
+  const { start, end } = monthDateKeyRange(y, mo);
+  return series.filter((p) => p.dateKey >= start && p.dateKey <= end);
+}
+
+function tradesClosedInMonth(trades, y, mo) {
+  return trades.filter((t) => {
+    const parts = t.dateKey.split("-").map(Number);
+    const yy = parts[0];
+    const mm = parts[1];
+    return yy === y && mm - 1 === mo;
+  });
+}
+
+/**
+ * Running sum of round-trip P&amp;L by close date (TraderSage-style cumulative return).
+ * - Dashboard (`monthFilter` null): all trades, ordered by calendar day.
+ * - Calendar (`{ y, mo }`): only trades closed in that month; line builds through the month.
+ */
+function cumulativePnlDailySeries(trades, monthFilter) {
+  const list = monthFilter
+    ? tradesClosedInMonth(trades, monthFilter.y, monthFilter.mo)
+    : trades;
+  if (!list.length) return [];
+
+  const pnlByDay = new Map();
+  for (const t of list) {
+    const k = t.dateKey;
+    const p = Number.isFinite(t.pnl) ? t.pnl : 0;
+    pnlByDay.set(k, (pnlByDay.get(k) || 0) + p);
+  }
+  const dayKeys = [...pnlByDay.keys()].sort();
+  let run = 0;
+  return dayKeys.map((dateKey) => {
+    run += pnlByDay.get(dateKey);
+    return { dateKey, cumulative: run };
+  });
 }
 
 function toDateKey(d) {
@@ -109,6 +161,43 @@ function formatCompactUsd(x) {
   return `${sign}$${Math.abs(x).toFixed(2)}`;
 }
 
+/** P&amp;L ÷ total risk when total risk &gt; 0; otherwise null. */
+function tradeRiskRewardMultiple(t, meta) {
+  const rps = meta.riskPerShare;
+  const rpsNum =
+    rps != null && rps !== "" && Number.isFinite(Number(rps))
+      ? Number(rps)
+      : null;
+  const totalRisk =
+    rpsNum != null && t.maxShares > 0 ? rpsNum * t.maxShares : null;
+  if (totalRisk == null || totalRisk <= 0 || !Number.isFinite(t.pnl)) {
+    return null;
+  }
+  return t.pnl / totalRisk;
+}
+
+/** Inner HTML for R:R cell in the trade table. */
+function riskRewardCellInnerHtml(t, meta) {
+  const rr = tradeRiskRewardMultiple(t, meta);
+  if (rr == null || !Number.isFinite(rr)) {
+    return `<span class="text-slate-600">—</span>`;
+  }
+  const cls =
+    rr > 0 ? "text-gain" : rr < 0 ? "text-loss" : "text-slate-400";
+  return `<span class="font-mono ${cls}">${rr.toFixed(2)}R</span>`;
+}
+
+/** Mean R-multiple over trades with total risk set (same basis as the R:R column). */
+function averageRiskRewardForTrades(trades) {
+  const values = [];
+  for (const t of trades) {
+    const rr = tradeRiskRewardMultiple(t, tradeMeta(t.id));
+    if (rr != null && Number.isFinite(rr)) values.push(rr);
+  }
+  if (!values.length) return null;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
 function tradeRowHtml(t) {
   const meta = tradeMeta(t.id);
   const hasNote = (meta.notes || "").trim().length > 0;
@@ -144,8 +233,8 @@ function tradeRowHtml(t) {
         <input type="number" step="0.01" min="0" placeholder="—" class="risk-input w-[4.5rem] px-2 py-1 rounded-md bg-surface border border-slate-700 text-slate-200 text-right font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent" data-trade-id="${escapeAttr(t.id)}" value="${escapeAttr(riskVal)}" />
       </td>
       <td class="px-3 py-2 text-right font-mono text-sm" data-risk-total="${escapeAttr(t.id)}">${totalStr}</td>
+      <td class="px-3 py-2 text-right font-mono text-sm" data-rr="${escapeAttr(t.id)}">${riskRewardCellInnerHtml(t, meta)}</td>
       <td class="px-3 py-2 text-right font-mono ${t.pnl > 0 ? "text-gain" : "text-loss"}">${formatUsd(t.pnl)}</td>
-      <td class="px-3 py-2 text-right font-mono text-slate-400">${t.returnPerDollar == null ? "—" : formatPct(t.returnPerDollar)}</td>
       <td class="px-3 py-2">${t.win ? '<span class="text-gain">Win</span>' : '<span class="text-loss">Loss</span>'}</td>
       <td class="px-2 py-2 no-row-open text-center">
         <button type="button" class="meta-preview-trigger inline-flex items-center justify-center gap-1.5 px-1 py-1 rounded-lg hover:bg-slate-800/80 transition-colors" data-trade-id="${escapeAttr(t.id)}" aria-label="Preview notes and screenshot">
@@ -192,6 +281,11 @@ async function persistRiskFromInput(tradeId, inputEl) {
         ? `<span class="font-mono ${tr >= 0 ? "text-slate-300" : "text-loss"}">${formatUsd(tr)}</span>`
         : `<span class="text-slate-600">—</span>`;
   }
+  const rrCell = document.querySelector(`[data-rr="${CSS.escape(tradeId)}"]`);
+  if (rrCell && t) {
+    rrCell.innerHTML = riskRewardCellInnerHtml(t, merged);
+  }
+  paintCharts();
 }
 
 function parseFiles(files) {
@@ -219,12 +313,24 @@ function render() {
   const trades = state.trades;
   const dayFilter = state.selectedDay;
 
-  const filtered =
-    dayFilter == null
-      ? trades
-      : trades
-          .filter((t) => t.dateKey === dayFilter)
-          .sort((a, b) => a.closeTs - b.closeTs);
+  const cal = state.calendarMonth;
+  let calendarTableTrades = tradesClosedInMonth(
+    trades,
+    cal.getFullYear(),
+    cal.getMonth(),
+  );
+  if (dayFilter != null) {
+    calendarTableTrades = calendarTableTrades
+      .filter((t) => t.dateKey === dayFilter)
+      .sort((a, b) => a.closeTs - b.closeTs);
+  } else {
+    calendarTableTrades = [...calendarTableTrades].sort(
+      (a, b) => b.closeTs - a.closeTs,
+    );
+  }
+  const calendarTableCaption = dayFilter
+    ? `Day: ${dayFilter} · sorted by close time`
+    : cal.toLocaleString(undefined, { month: "long", year: "numeric" });
 
   const dashboardStatsHtml = `
     <section class="grid sm:grid-cols-2 lg:grid-cols-5 gap-4" id="stat-cards">
@@ -254,7 +360,7 @@ function render() {
         <section class="rounded-xl border border-slate-800 bg-surface-raised overflow-hidden">
           <div class="px-4 py-3 border-b border-slate-800 flex flex-wrap justify-between gap-2">
             <h2 class="text-sm font-medium text-slate-400">Trades</h2>
-            <span class="text-xs text-slate-500">${dayFilter ? `Day: ${dayFilter} · sorted by close time` : "All days"} · ${filtered.length} shown</span>
+            <span class="text-xs text-slate-500">${calendarTableCaption} · ${calendarTableTrades.length} shown</span>
           </div>
           <div class="overflow-x-auto">
             <table class="w-full text-sm min-w-[1000px]">
@@ -267,15 +373,15 @@ function render() {
                   <th class="px-3 py-2 font-medium text-right cursor-help" title="Peak shares held during the trade. Tooltip on cell shows round-turn share volume.">Shares</th>
                   <th class="px-3 py-2 font-medium text-right cursor-help" title="Dollar risk per share (e.g. distance to stop). Total risk = this × peak shares.">Risk/sh $</th>
                   <th class="px-3 py-2 font-medium text-right cursor-help" title="Risk/sh × peak shares, when risk/sh is set.">Total risk</th>
+                  <th class="px-3 py-2 font-medium text-right cursor-help" title="P&amp;L divided by total risk (1R = amount risked). Shown only when total risk is set.">R:R</th>
                   <th class="px-3 py-2 font-medium text-right">P&amp;L</th>
-                  <th class="px-3 py-2 font-medium text-right cursor-help underline decoration-slate-600 decoration-dotted underline-offset-4" title="This trade’s P&amp;L divided by half the sum of absolute fill amounts (same basis as “Avg return per dollar”).">Return / $</th>
                   <th class="px-3 py-2 font-medium">Result</th>
                   <th class="px-3 py-2 font-medium text-center cursor-help" title="Hover for note and screenshot preview.">Notes</th>
                   <th class="px-2 py-2 font-medium text-right w-10"><span class="sr-only">Options</span></th>
                 </tr>
               </thead>
               <tbody id="trades-tbody" class="divide-y divide-slate-800/80">
-                ${filtered.map((t) => tradeRowHtml(t)).join("")}
+                ${calendarTableTrades.map((t) => tradeRowHtml(t)).join("")}
               </tbody>
             </table>
           </div>
@@ -306,12 +412,31 @@ function render() {
 
       ${state.page === "dashboard" ? dashboardStatsHtml : ""}
 
-      <section class="grid lg:grid-cols-2 gap-6">
-        <div class="rounded-xl border border-slate-800 bg-surface-raised p-4">
+      <section class="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
           <h2 class="text-sm font-medium text-slate-400 mb-3">Equity curve</h2>
           <div class="h-64"><canvas id="chart-equity"></canvas></div>
         </div>
-        <div class="rounded-xl border border-slate-800 bg-surface-raised p-4">
+        <section class="rounded-xl border border-slate-800 bg-surface-raised p-4 sm:p-5 min-w-0" id="equity-kpi-section">
+          <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+            <h2 class="text-sm font-medium text-slate-400">Statistics</h2>
+            <span id="kpi-equity-period" class="text-xs text-slate-400 font-medium px-2.5 py-1 rounded-md bg-surface-overlay border border-slate-700"></span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-4 mb-4">
+            <div class="min-w-0">
+              <p id="kpi-cumulative-return" class="text-2xl sm:text-3xl font-semibold tracking-tight tabular-nums text-white">—</p>
+              <p class="text-xs text-slate-500 mt-1.5">Cumulative return <span class="text-slate-600">(running sum of round-trip P&amp;L by close date)</span></p>
+            </div>
+            <div class="min-w-0">
+              <p id="kpi-avg-rr" class="text-2xl sm:text-3xl font-semibold tracking-tight tabular-nums font-mono text-white">—</p>
+              <p class="text-xs text-slate-500 mt-1.5">Average R:R <span class="text-slate-600">(mean of P&amp;L ÷ total risk for trades with total risk set)</span></p>
+            </div>
+          </div>
+          <div class="h-14 w-full min-w-0">
+            <canvas id="chart-equity-spark" class="w-full h-full" aria-label="Cumulative P&amp;L sparkline for this period"></canvas>
+          </div>
+        </section>
+        <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
           <h2 class="text-sm font-medium text-slate-400 mb-3">P&amp;L by weekday (close)</h2>
           <div class="h-64"><canvas id="chart-weekday"></canvas></div>
         </div>
@@ -600,6 +725,7 @@ function bind() {
   $("#file-input")?.addEventListener("change", async (e) => {
     const input = e.target;
     const files = input.files;
+    
     if (!files?.length) return;
     const parts = await parseFiles(files);
     const { fills, balancePoints } = mergeExtracts(parts);
@@ -624,7 +750,8 @@ function bind() {
       state.calendarMonth.getMonth() - 1,
       1,
     );
-    paintCalendar();
+    state.selectedDay = null;
+    render();
   });
   $("#cal-next")?.addEventListener("click", () => {
     state.calendarMonth = new Date(
@@ -632,7 +759,8 @@ function bind() {
       state.calendarMonth.getMonth() + 1,
       1,
     );
-    paintCalendar();
+    state.selectedDay = null;
+    render();
   });
   $("#cal-clear")?.addEventListener("click", () => {
     state.selectedDay = null;
@@ -686,11 +814,114 @@ function bind() {
 function paintCharts() {
   const eq = $("#chart-equity");
   const wd = $("#chart-weekday");
-  if (eq && state.equity.length) {
-    renderEquityChart(eq, state.equity);
+  const spark = $("#chart-equity-spark");
+  const kpiReturn = $("#kpi-cumulative-return");
+  const kpiAvgRr = $("#kpi-avg-rr");
+  const kpiPeriod = $("#kpi-equity-period");
+  if (!eq || !wd) return;
+
+  let equitySlice = state.equity;
+  let weekdayBars = state.metrics?.byWeekday;
+  let tradesForKpis = state.trades;
+
+  if (state.page === "calendar") {
+    const d = state.calendarMonth;
+    const y = d.getFullYear();
+    const mo = d.getMonth();
+    equitySlice = equitySeriesForMonth(state.equity, y, mo);
+    tradesForKpis = tradesClosedInMonth(state.trades, y, mo);
+    weekdayBars = computeMetrics(tradesForKpis).byWeekday;
+    if (kpiPeriod) {
+      kpiPeriod.textContent = d.toLocaleString(undefined, {
+        month: "long",
+        year: "numeric",
+      });
+    }
+  } else if (kpiPeriod) {
+    kpiPeriod.textContent = "All loaded data";
   }
-  if (wd && state.metrics) {
-    renderWeekdayChart(wd, state.metrics.byWeekday);
+
+  const cumSeries =
+    state.page === "calendar"
+      ? cumulativePnlDailySeries(state.trades, {
+          y: state.calendarMonth.getFullYear(),
+          mo: state.calendarMonth.getMonth(),
+        })
+      : cumulativePnlDailySeries(state.trades, null);
+  const cumEnd =
+    cumSeries.length > 0
+      ? cumSeries[cumSeries.length - 1].cumulative
+      : null;
+
+  if (kpiReturn) {
+    kpiReturn.textContent =
+      cumEnd != null && Number.isFinite(cumEnd) ? formatUsd(cumEnd) : "—";
+    kpiReturn.classList.remove(
+      "text-gain",
+      "text-loss",
+      "text-white",
+      "text-slate-300",
+    );
+    if (cumEnd == null || !Number.isFinite(cumEnd)) {
+      kpiReturn.classList.add("text-white");
+    } else if (cumEnd > 0) {
+      kpiReturn.classList.add("text-gain");
+    } else if (cumEnd < 0) {
+      kpiReturn.classList.add("text-loss");
+    } else {
+      kpiReturn.classList.add("text-slate-300");
+    }
+  }
+
+  const avgRr = averageRiskRewardForTrades(tradesForKpis);
+  if (kpiAvgRr) {
+    kpiAvgRr.textContent =
+      avgRr != null && Number.isFinite(avgRr)
+        ? `${avgRr.toFixed(2)}R`
+        : "—";
+    kpiAvgRr.classList.remove(
+      "text-gain",
+      "text-loss",
+      "text-white",
+      "text-slate-300",
+    );
+    if (avgRr == null || !Number.isFinite(avgRr)) {
+      kpiAvgRr.classList.add("text-white");
+    } else if (avgRr > 0) {
+      kpiAvgRr.classList.add("text-gain");
+    } else if (avgRr < 0) {
+      kpiAvgRr.classList.add("text-loss");
+    } else {
+      kpiAvgRr.classList.add("text-slate-300");
+    }
+  }
+
+  if (spark) {
+    if (cumSeries.length >= 2) {
+      renderCumulativeReturnSparkline(spark, cumSeries);
+    } else if (cumSeries.length === 1) {
+      renderCumulativeReturnSparkline(spark, [
+        cumSeries[0],
+        {
+          dateKey: cumSeries[0].dateKey,
+          cumulative: cumSeries[0].cumulative,
+        },
+      ]);
+    } else {
+      destroyChart(spark);
+    }
+  }
+
+  if (equitySlice.length) {
+    renderEquityChart(eq, equitySlice);
+  } else {
+    destroyChart(eq);
+  }
+
+  if (weekdayBars) {
+    renderWeekdayChart(wd, weekdayBars);
+  } else {
+    destroyChart(wd);
   }
 }
 
