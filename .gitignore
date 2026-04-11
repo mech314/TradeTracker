@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .DS_Store
 frontend/dist/
+static/*
+!static/.gitkeep
