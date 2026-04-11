@@ -2,6 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   @apply selection:bg-accent/30 selection:text-white;
+  overflow-x: clip;
+}
+
+/* Momentum scrolling for wide calendar / tables on iOS */
+.touch-pan-x {
+  -webkit-overflow-scrolling: touch;
 }

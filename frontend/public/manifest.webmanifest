@@ -1,0 +1,17 @@
+{
+  "name": "TradeTracker",
+  "short_name": "TradeTracker",
+  "description": "Round-trip trade stats from CSV fills",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0c0f14",
+  "theme_color": "#12171f",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

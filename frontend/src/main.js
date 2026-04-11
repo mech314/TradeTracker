@@ -39,6 +39,7 @@ let state = {
 
 let metaPopoverHideTimer = null;
 let metaPopoverAnchor = null;
+let metaPopoverDocumentCloseBound = false;
 let modalScreenshotExplicitlyCleared = false;
 let tradeMenuTradeId = null;
 
@@ -198,11 +199,8 @@ function averageRiskRewardForTrades(trades) {
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
-function tradeRowHtml(t) {
-  const meta = tradeMeta(t.id);
-  const hasNote = (meta.notes || "").trim().length > 0;
-  const hasShot =
-    state.screenshotUrls.has(t.id) || hasScreenshotStored(meta);
+/** Shared risk/sh, total risk markup, and input value for table + mobile cards. */
+function tradeRiskDisplayParts(t, meta) {
   const rps = meta.riskPerShare;
   const rpsNum =
     rps != null && rps !== "" && Number.isFinite(Number(rps))
@@ -211,6 +209,19 @@ function tradeRowHtml(t) {
   const totalRisk =
     rpsNum != null && t.maxShares > 0 ? rpsNum * t.maxShares : null;
   const riskVal = rpsNum != null ? String(rpsNum) : "";
+  const totalInner =
+    totalRisk != null
+      ? `<span class="font-mono ${totalRisk >= 0 ? "text-slate-300" : "text-loss"}">${formatUsd(totalRisk)}</span>`
+      : `<span class="text-slate-600">—</span>`;
+  return { rpsNum, riskVal, totalInner };
+}
+
+function tradeRowHtml(t) {
+  const meta = tradeMeta(t.id);
+  const hasNote = (meta.notes || "").trim().length > 0;
+  const hasShot =
+    state.screenshotUrls.has(t.id) || hasScreenshotStored(meta);
+  const { riskVal, totalInner } = tradeRiskDisplayParts(t, meta);
   const noteClass = hasNote
     ? "bg-amber-500/25 text-amber-200 ring-1 ring-amber-500/40"
     : "bg-slate-800 text-slate-600";
@@ -218,10 +229,6 @@ function tradeRowHtml(t) {
     ? "bg-sky-500/25 text-sky-200 ring-1 ring-sky-500/40"
     : "bg-slate-800 text-slate-600";
   const shareTitle = `Peak shares: ${t.maxShares} · Round-turn volume: ${t.shareTurnover}`;
-  const totalStr =
-    totalRisk != null
-      ? `<span class="font-mono ${totalRisk >= 0 ? "text-slate-300" : "text-loss"}">${formatUsd(totalRisk)}</span>`
-      : `<span class="text-slate-600">—</span>`;
   return `
     <tr class="hover:bg-surface-overlay/60 cursor-pointer transition-colors trade-row group" data-id="${escapeAttr(t.id)}">
       <td class="px-3 py-2 font-mono text-slate-400">${t.dateKey}</td>
@@ -230,22 +237,67 @@ function tradeRowHtml(t) {
       <td class="px-3 py-2 text-slate-400">${t.openSide}</td>
       <td class="px-3 py-2 text-right font-mono text-slate-300" title="${escapeAttr(shareTitle)}">${t.maxShares}</td>
       <td class="px-3 py-2 text-right no-row-open">
-        <input type="number" step="0.01" min="0" placeholder="—" class="risk-input w-[4.5rem] px-2 py-1 rounded-md bg-surface border border-slate-700 text-slate-200 text-right font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent" data-trade-id="${escapeAttr(t.id)}" value="${escapeAttr(riskVal)}" />
+        <input type="number" step="0.01" min="0" inputmode="decimal" placeholder="—" class="risk-input w-[4.5rem] min-h-[44px] sm:min-h-0 px-2 py-2 sm:py-1 rounded-md bg-surface border border-slate-700 text-slate-200 text-right font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent" data-trade-id="${escapeAttr(t.id)}" value="${escapeAttr(riskVal)}" />
       </td>
-      <td class="px-3 py-2 text-right font-mono text-sm" data-risk-total="${escapeAttr(t.id)}">${totalStr}</td>
+      <td class="px-3 py-2 text-right font-mono text-sm" data-risk-total="${escapeAttr(t.id)}">${totalInner}</td>
       <td class="px-3 py-2 text-right font-mono text-sm" data-rr="${escapeAttr(t.id)}">${riskRewardCellInnerHtml(t, meta)}</td>
       <td class="px-3 py-2 text-right font-mono ${t.pnl > 0 ? "text-gain" : "text-loss"}">${formatUsd(t.pnl)}</td>
       <td class="px-3 py-2">${t.win ? '<span class="text-gain">Win</span>' : '<span class="text-loss">Loss</span>'}</td>
       <td class="px-2 py-2 no-row-open text-center">
-        <button type="button" class="meta-preview-trigger inline-flex items-center justify-center gap-1.5 px-1 py-1 rounded-lg hover:bg-slate-800/80 transition-colors" data-trade-id="${escapeAttr(t.id)}" aria-label="Preview notes and screenshot">
-          <span class="inline-flex h-6 min-w-[1.5rem] px-1 items-center justify-center rounded text-[10px] font-semibold ${noteClass}">N</span>
-          <span class="inline-flex h-6 min-w-[1.5rem] px-1 items-center justify-center rounded text-[10px] font-semibold ${shotClass}">S</span>
+        <button type="button" class="meta-preview-trigger inline-flex items-center justify-center gap-1.5 min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 px-2 py-2 sm:px-1 sm:py-1 rounded-lg hover:bg-slate-800/80 transition-colors active:bg-slate-800" data-trade-id="${escapeAttr(t.id)}" aria-label="Preview notes and screenshot">
+          <span class="inline-flex h-7 w-7 sm:h-6 sm:min-w-[1.5rem] items-center justify-center rounded text-[10px] font-semibold ${noteClass}">N</span>
+          <span class="inline-flex h-7 w-7 sm:h-6 sm:min-w-[1.5rem] items-center justify-center rounded text-[10px] font-semibold ${shotClass}">S</span>
         </button>
       </td>
       <td class="px-1 py-2 no-row-open text-right w-10">
-        <button type="button" class="trade-menu-btn p-1.5 rounded-md text-slate-500 hover:text-slate-200 hover:bg-slate-800/80 transition-colors" data-trade-id="${escapeAttr(t.id)}" aria-label="Trade options" aria-haspopup="menu" aria-expanded="false">⋮</button>
+        <button type="button" class="trade-menu-btn min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 inline-flex items-center justify-center rounded-md text-slate-500 hover:text-slate-200 hover:bg-slate-800/80 transition-colors" data-trade-id="${escapeAttr(t.id)}" aria-label="Trade options" aria-haspopup="menu" aria-expanded="false">⋮</button>
       </td>
     </tr>`;
+}
+
+function tradeMobileCardHtml(t) {
+  const meta = tradeMeta(t.id);
+  const hasNote = (meta.notes || "").trim().length > 0;
+  const hasShot =
+    state.screenshotUrls.has(t.id) || hasScreenshotStored(meta);
+  const { riskVal, totalInner } = tradeRiskDisplayParts(t, meta);
+  const noteClass = hasNote
+    ? "bg-amber-500/25 text-amber-200 ring-1 ring-amber-500/40"
+    : "bg-slate-800 text-slate-600";
+  const shotClass = hasShot
+    ? "bg-sky-500/25 text-sky-200 ring-1 ring-sky-500/40"
+    : "bg-slate-800 text-slate-600";
+  const pnlCls = t.pnl > 0 ? "text-gain" : "text-loss";
+  return `
+    <article class="trade-mobile-card trade-row rounded-xl border border-slate-800 bg-surface-overlay/50 p-3 cursor-pointer" data-id="${escapeAttr(t.id)}">
+      <div class="flex justify-between gap-3 items-start">
+        <div class="min-w-0">
+          <p class="text-base font-semibold text-white truncate">${escapeHtml(t.symbol)}</p>
+          <p class="text-xs text-slate-500 font-mono mt-0.5">${t.dateKey} · ${formatCloseTime(t.closeTs)}</p>
+          <p class="text-xs text-slate-400 mt-1">${escapeHtml(t.openSide)} · <span class="font-mono text-slate-300">${t.maxShares}</span> sh</p>
+        </div>
+        <div class="text-right shrink-0">
+          <p class="text-lg font-mono font-semibold ${pnlCls}">${formatUsd(t.pnl)}</p>
+          <p class="text-xs mt-0.5">${t.win ? '<span class="text-gain">Win</span>' : '<span class="text-loss">Loss</span>'}</p>
+        </div>
+      </div>
+      <div class="mt-3 pt-3 border-t border-slate-800/80 flex flex-wrap items-center gap-2 no-row-open">
+        <span class="text-xs text-slate-500 shrink-0">Risk/sh</span>
+        <input type="number" step="0.01" min="0" inputmode="decimal" placeholder="—" class="risk-input flex-1 min-w-[5rem] max-w-[9rem] min-h-[44px] px-3 rounded-lg bg-surface border border-slate-700 text-slate-200 text-right font-mono text-sm focus:outline-none focus:ring-1 focus:ring-accent" data-trade-id="${escapeAttr(t.id)}" value="${escapeAttr(riskVal)}" />
+        <span class="text-xs text-slate-500 shrink-0">Total</span>
+        <span class="text-sm font-mono text-right min-w-[4.5rem]" data-risk-total="${escapeAttr(t.id)}">${totalInner}</span>
+        <span class="text-xs text-slate-500 shrink-0">R:R</span>
+        <span class="text-sm font-mono min-w-[3.5rem] text-right" data-rr="${escapeAttr(t.id)}">${riskRewardCellInnerHtml(t, meta)}</span>
+      </div>
+      <div class="mt-3 flex items-center justify-between no-row-open">
+        <button type="button" class="meta-preview-trigger inline-flex items-center gap-2 min-h-[44px] px-3 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800/80 active:bg-slate-800 transition-colors" data-trade-id="${escapeAttr(t.id)}" aria-label="Notes and screenshot">
+          <span class="inline-flex h-8 w-8 items-center justify-center rounded text-[10px] font-semibold ${noteClass}">N</span>
+          <span class="inline-flex h-8 w-8 items-center justify-center rounded text-[10px] font-semibold ${shotClass}">S</span>
+          <span class="text-xs text-slate-500">Preview</span>
+        </button>
+        <button type="button" class="trade-menu-btn min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 hover:text-slate-200 hover:bg-slate-800/80 border border-transparent" data-trade-id="${escapeAttr(t.id)}" aria-label="Trade options" aria-haspopup="menu" aria-expanded="false">⋮</button>
+      </div>
+    </article>`;
 }
 
 async function persistRiskFromInput(tradeId, inputEl) {
@@ -270,20 +322,26 @@ async function persistRiskFromInput(tradeId, inputEl) {
   }
   state.tradeMetaById.set(tradeId, merged);
   const t = state.trades.find((x) => x.id === tradeId);
-  const cell = document.querySelector(
+  const riskEls = document.querySelectorAll(
     `[data-risk-total="${CSS.escape(tradeId)}"]`,
   );
-  if (cell && t) {
+  if (t) {
     const tr =
       riskPerShare != null && t.maxShares > 0 ? riskPerShare * t.maxShares : null;
-    cell.innerHTML =
+    const inner =
       tr != null
         ? `<span class="font-mono ${tr >= 0 ? "text-slate-300" : "text-loss"}">${formatUsd(tr)}</span>`
         : `<span class="text-slate-600">—</span>`;
+    riskEls.forEach((cell) => {
+      cell.innerHTML = inner;
+    });
   }
-  const rrCell = document.querySelector(`[data-rr="${CSS.escape(tradeId)}"]`);
-  if (rrCell && t) {
-    rrCell.innerHTML = riskRewardCellInnerHtml(t, merged);
+  const rrEls = document.querySelectorAll(`[data-rr="${CSS.escape(tradeId)}"]`);
+  if (t) {
+    const rrHtml = riskRewardCellInnerHtml(t, merged);
+    rrEls.forEach((cell) => {
+      cell.innerHTML = rrHtml;
+    });
   }
   paintCharts();
 }
@@ -345,14 +403,14 @@ function render() {
     <section class="rounded-xl border border-slate-800 bg-surface-raised p-4">
           <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
             <h2 class="text-sm font-medium text-slate-400">Calendar</h2>
-            <div class="flex items-center gap-2">
-              <button type="button" id="cal-prev" class="px-3 py-1.5 rounded-lg bg-surface-overlay text-sm text-slate-300 hover:bg-slate-800">←</button>
-              <span class="text-sm text-slate-300 min-w-[9rem] text-center" id="cal-label"></span>
-              <button type="button" id="cal-next" class="px-3 py-1.5 rounded-lg bg-surface-overlay text-sm text-slate-300 hover:bg-slate-800">→</button>
-              ${state.selectedDay ? `<button type="button" id="cal-clear" class="text-xs text-accent ml-2">Clear day</button>` : ""}
+            <div class="flex items-center gap-1 sm:gap-2 flex-wrap justify-end">
+              <button type="button" id="cal-prev" class="min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 px-3 py-2 sm:py-1.5 rounded-lg bg-surface-overlay text-sm text-slate-300 hover:bg-slate-800 active:bg-slate-800">←</button>
+              <span class="text-sm text-slate-300 min-w-[8rem] sm:min-w-[9rem] text-center" id="cal-label"></span>
+              <button type="button" id="cal-next" class="min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 px-3 py-2 sm:py-1.5 rounded-lg bg-surface-overlay text-sm text-slate-300 hover:bg-slate-800 active:bg-slate-800">→</button>
+              ${state.selectedDay ? `<button type="button" id="cal-clear" class="min-h-[44px] px-3 text-xs text-accent sm:ml-2 rounded-lg hover:bg-slate-800/80">Clear day</button>` : ""}
             </div>
           </div>
-          <div class="overflow-x-auto -mx-1 px-1">
+          <div class="overflow-x-auto -mx-1 px-1 touch-pan-x overscroll-x-contain">
             <div id="calendar-grid" class="space-y-2 text-sm min-w-[640px]"></div>
           </div>
         </section>
@@ -362,7 +420,7 @@ function render() {
             <h2 class="text-sm font-medium text-slate-400">Trades</h2>
             <span class="text-xs text-slate-500">${calendarTableCaption} · ${calendarTableTrades.length} shown</span>
           </div>
-          <div class="overflow-x-auto">
+          <div class="hidden md:block overflow-x-auto touch-pan-x">
             <table class="w-full text-sm min-w-[1000px]">
               <thead class="text-left text-slate-500 border-b border-slate-800">
                 <tr>
@@ -385,29 +443,49 @@ function render() {
               </tbody>
             </table>
           </div>
+          <div id="trades-mobile-cards" class="md:hidden p-3 space-y-3 bg-surface-raised">
+            ${calendarTableTrades.map((t) => tradeMobileCardHtml(t)).join("")}
+          </div>
         </section>`;
+
+  const navBtn = (page, label) => {
+    const active = state.page === page;
+    return `<button type="button" data-nav-page="${page}" class="w-full text-left px-3 py-2.5 text-sm rounded-lg transition-colors ${
+      active
+        ? "bg-slate-800 text-white border-l-2 border-accent pl-[10px]"
+        : "text-slate-300 hover:bg-slate-800/90"
+    }">${label}</button>`;
+  };
+  const navTab = (page, label) => {
+    const active = state.page === page;
+    return `<button type="button" data-nav-page="${page}" class="min-h-[48px] rounded-lg text-sm font-medium transition-colors ${
+      active
+        ? "bg-slate-800 text-white shadow-sm"
+        : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/60"
+    }">${label}</button>`;
+  };
 
   root.innerHTML = `
     <div class="min-h-screen flex">
-    <aside class="w-64 shrink-0 min-h-screen self-stretch bg-slate-900 border-r border-slate-700 p-4 text-sm text-slate-300">
-      <button type="button" class="w-full text-left px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/90 transition-colors" data-nav-page="dashboard">Dashboard</button>
-      <button type="button" class="w-full text-left px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/90 transition-colors" data-nav-page="calendar">Calendar</button>
+    <aside class="hidden md:flex w-56 lg:w-64 shrink-0 min-h-screen self-stretch flex-col bg-slate-900 border-r border-slate-700 p-3 lg:p-4 text-sm text-slate-300">
+      ${navBtn("dashboard", "Dashboard")}
+      ${navBtn("calendar", "Calendar")}
     </aside>
-    <div class="flex-1 min-w-0 flex flex-col min-h-screen">
-    <header class="border-b border-slate-800/80 bg-surface-raised/50 backdrop-blur-sm sticky top-0 z-30">
-      <div class="max-w-7xl mx-auto px-4 py-4 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 class="text-xl font-semibold tracking-tight text-white">TradeTracker</h1>
-          <p class="text-sm text-slate-500 mt-0.5">Same-day round trips · long & short · no fees in P&amp;L</p>
+    <div class="flex-1 min-w-0 flex flex-col min-h-screen pb-[calc(3.5rem+env(safe-area-inset-bottom,0px))] md:pb-0">
+    <header class="border-b border-slate-800/80 bg-surface-raised/50 backdrop-blur-sm sticky top-0 z-30 pt-[env(safe-area-inset-top,0px)]">
+      <div class="max-w-7xl mx-auto px-3 sm:px-4 py-3 sm:py-4 flex flex-wrap items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h1 class="text-lg sm:text-xl font-semibold tracking-tight text-white">TradeTracker</h1>
+          <p class="text-xs sm:text-sm text-slate-500 mt-0.5 leading-snug">Same-day round trips · long &amp; short · no fees in P&amp;L</p>
         </div>
-        <label class="cursor-pointer inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent/15 text-accent text-sm font-medium hover:bg-accent/25 transition-colors border border-accent/30">
+        <label class="cursor-pointer inline-flex items-center justify-center gap-2 min-h-[44px] px-4 py-2 rounded-lg bg-accent/15 text-accent text-sm font-medium hover:bg-accent/25 transition-colors border border-accent/30 shrink-0">
           <input type="file" accept=".csv,text/csv" multiple class="hidden" id="file-input" />
           Load CSV
         </label>
       </div>
     </header>
 
-    <main class="max-w-7xl mx-auto px-4 py-8 space-y-10">
+    <main class="max-w-7xl mx-auto px-3 sm:px-4 py-6 sm:py-8 space-y-8 sm:space-y-10 w-full min-w-0">
       <p class="text-sm text-slate-500" id="file-status">${state.filesLabel}</p>
 
       ${state.page === "dashboard" ? dashboardStatsHtml : ""}
@@ -415,7 +493,7 @@ function render() {
       <section class="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
           <h2 class="text-sm font-medium text-slate-400 mb-3">Equity curve</h2>
-          <div class="h-64"><canvas id="chart-equity"></canvas></div>
+          <div class="h-52 sm:h-64"><canvas id="chart-equity"></canvas></div>
         </div>
         <section class="rounded-xl border border-slate-800 bg-surface-raised p-4 sm:p-5 min-w-0" id="equity-kpi-section">
           <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
@@ -438,7 +516,7 @@ function render() {
         </section>
         <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
           <h2 class="text-sm font-medium text-slate-400 mb-3">P&amp;L by weekday (close)</h2>
-          <div class="h-64"><canvas id="chart-weekday"></canvas></div>
+          <div class="h-52 sm:h-64"><canvas id="chart-weekday"></canvas></div>
         </div>
       </section>
 
@@ -446,6 +524,10 @@ function render() {
 
 
     </main>
+    <nav class="md:hidden fixed bottom-0 inset-x-0 z-40 grid grid-cols-2 gap-1 px-2 pt-1 border-t border-slate-800 bg-slate-900/95 backdrop-blur-md pb-[max(0.5rem,env(safe-area-inset-bottom,0px))]" aria-label="Primary navigation">
+      ${navTab("dashboard", "Dashboard")}
+      ${navTab("calendar", "Calendar")}
+    </nav>
     </div>
     </div>
 
@@ -455,8 +537,8 @@ function render() {
       <button type="button" id="trade-row-menu-delete" class="w-full text-left px-3 py-2 text-sm text-loss hover:bg-slate-800/90 transition-colors" role="menuitem">Delete trade…</button>
     </div>
 
-    <div id="modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-      <div class="bg-surface-raised border border-slate-800 rounded-xl max-w-lg w-full max-h-[90vh] overflow-y-auto shadow-2xl">
+    <div id="modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] bg-black/70 backdrop-blur-sm">
+      <div class="bg-surface-raised border border-slate-800 rounded-xl max-w-lg w-full max-h-[min(90vh,100dvh-2rem)] overflow-y-auto shadow-2xl">
         <div class="p-4 border-b border-slate-800 flex justify-between items-start gap-4">
           <div>
             <h3 class="text-lg font-semibold text-white" id="modal-title"></h3>
@@ -483,7 +565,7 @@ function render() {
             </div>
             <button type="button" id="modal-clear-shot" class="mt-2 text-xs text-slate-500 hover:text-loss hidden">Remove image</button>
           </div>
-          <button type="button" id="modal-save" class="w-full py-2.5 rounded-lg bg-accent text-white text-sm font-medium hover:bg-blue-500 transition-colors">Save</button>
+          <button type="button" id="modal-save" class="w-full min-h-[48px] py-3 sm:py-2.5 rounded-lg bg-accent text-white text-sm font-medium hover:bg-blue-500 transition-colors">Save</button>
         </div>
       </div>
     </div>
@@ -576,19 +658,29 @@ async function hydrateTradeMeta() {
   }
 }
 
+function closeMetaPopover() {
+  clearTimeout(metaPopoverHideTimer);
+  const pop = $("#meta-popover");
+  if (pop) {
+    pop.classList.add("hidden", "pointer-events-none");
+  }
+  metaPopoverAnchor = null;
+}
+
 function scheduleHideMetaPopover() {
   clearTimeout(metaPopoverHideTimer);
   metaPopoverHideTimer = setTimeout(() => {
-    const pop = $("#meta-popover");
-    if (pop) {
-      pop.classList.add("hidden", "pointer-events-none");
-      metaPopoverAnchor = null;
-    }
+    closeMetaPopover();
   }, 180);
 }
 
 function cancelHideMetaPopover() {
   clearTimeout(metaPopoverHideTimer);
+}
+
+/** Desktop: hover popover. Touch devices use tap (see bind). */
+function metaPopoverHoverUsable() {
+  return window.matchMedia("(hover: hover) and (pointer: fine)").matches;
 }
 
 function positionMetaPopover(anchor) {
@@ -599,14 +691,20 @@ function positionMetaPopover(anchor) {
   const pr = pop.getBoundingClientRect();
   const pw = Math.max(pr.width, 1);
   const ph = Math.max(pr.height, 1);
+  const narrow = window.innerWidth < 640;
 
-  let left = r.right + margin;
-  if (left + pw > window.innerWidth - margin) {
+  let left = narrow
+    ? r.left + (r.width - pw) / 2
+    : r.right + margin;
+  if (!narrow && left + pw > window.innerWidth - margin) {
     left = r.left - pw - margin;
   }
   left = Math.max(margin, Math.min(left, window.innerWidth - pw - margin));
 
-  let top = r.top;
+  let top = narrow ? r.bottom + margin : r.top;
+  if (narrow && top + ph > window.innerHeight - margin) {
+    top = Math.max(margin, r.top - ph - margin);
+  }
   top = Math.max(margin, Math.min(top, window.innerHeight - ph - margin));
 
   pop.style.left = `${left}px`;
@@ -621,7 +719,7 @@ function showMetaPopover(tradeId, anchor) {
   const meta = tradeMeta(tradeId);
   const note = (meta.notes || "").trim();
   const shotUrl = state.screenshotUrls.get(tradeId) || null;
-  let inner = `<div class="popover-inner rounded-lg border border-slate-600 bg-slate-950 shadow-2xl p-3 max-w-[280px] max-h-[min(28rem,calc(100svh-24px))] overflow-y-auto text-xs text-slate-200 space-y-2 pointer-events-auto">`;
+  let inner = `<div class="popover-inner rounded-lg border border-slate-600 bg-slate-950 shadow-2xl p-3 w-[min(280px,calc(100vw-16px))] max-h-[min(28rem,calc(100svh-24px))] overflow-y-auto text-xs text-slate-200 space-y-2 pointer-events-auto">`;
   if (note) {
     inner += `<div class="text-slate-400 text-[10px] font-medium uppercase tracking-wide">Note</div><div class="whitespace-pre-wrap max-h-36 overflow-y-auto text-slate-200 leading-snug">${escapeHtml(note)}</div>`;
   }
@@ -773,6 +871,12 @@ function bind() {
     if (tr?.dataset.id) openModal(tr.dataset.id);
   });
 
+  $("#trades-mobile-cards")?.addEventListener("click", (e) => {
+    if (e.target.closest(".no-row-open")) return;
+    const card = e.target.closest(".trade-mobile-card");
+    if (card?.dataset.id) openModal(card.dataset.id);
+  });
+
   document.querySelectorAll(".risk-input").forEach((inp) => {
     inp.addEventListener("click", (ev) => ev.stopPropagation());
     inp.addEventListener("keydown", (ev) => ev.stopPropagation());
@@ -783,13 +887,37 @@ function bind() {
   });
 
   document.querySelectorAll(".meta-preview-trigger").forEach((btn) => {
-    btn.addEventListener("click", (ev) => ev.stopPropagation());
-    btn.addEventListener("mouseenter", () => {
+    btn.addEventListener("click", (ev) => {
+      if (metaPopoverHoverUsable()) {
+        ev.stopPropagation();
+        return;
+      }
+      ev.preventDefault();
+      ev.stopPropagation();
       const id = btn.dataset.tradeId;
       if (id) showMetaPopover(id, btn);
     });
-    btn.addEventListener("mouseleave", scheduleHideMetaPopover);
+    btn.addEventListener("mouseenter", () => {
+      if (!metaPopoverHoverUsable()) return;
+      const id = btn.dataset.tradeId;
+      if (id) showMetaPopover(id, btn);
+    });
+    btn.addEventListener("mouseleave", () => {
+      if (!metaPopoverHoverUsable()) return;
+      scheduleHideMetaPopover();
+    });
   });
+
+  if (!metaPopoverDocumentCloseBound) {
+    metaPopoverDocumentCloseBound = true;
+    document.addEventListener("click", (e) => {
+      const pop = $("#meta-popover");
+      if (!pop || pop.classList.contains("hidden")) return;
+      if (e.target.closest("#meta-popover")) return;
+      if (e.target.closest(".meta-preview-trigger")) return;
+      closeMetaPopover();
+    });
+  }
 
   $("#modal-close")?.addEventListener("click", closeModal);
   $("#modal")?.addEventListener("click", (e) => {
@@ -941,7 +1069,7 @@ function paintCalendar() {
   const trades = state.trades;
   const weekRows = getWeekRowsForMonth(y, mo);
   const colTemplate =
-    "grid-cols-[repeat(5,minmax(0,1fr))_minmax(12rem,1fr)]";
+    "grid-cols-[repeat(5,minmax(0,1fr))_minmax(9.5rem,1fr)] sm:grid-cols-[repeat(5,minmax(0,1fr))_minmax(12rem,1fr)]";
 
   const dowLabels = ["Mon", "Tue", "Wed", "Thu", "Fri"];
   let html = `
@@ -987,7 +1115,7 @@ function paintCalendar() {
 
       dayCells += `
         <button type="button" data-day="${key}"
-          class="cal-cell relative rounded-xl border text-left min-h-[5.75rem] transition-all hover:ring-1 hover:ring-accent/40 ${cardBg} ${sel ? "ring-2 ring-accent" : ""} ${inMonth ? "" : "opacity-55"}">
+          class="cal-cell relative rounded-xl border text-left min-h-[4.75rem] sm:min-h-[5.75rem] transition-all active:opacity-90 hover:ring-1 hover:ring-accent/40 ${cardBg} ${sel ? "ring-2 ring-accent" : ""} ${inMonth ? "" : "opacity-55"}">
           <span class="absolute top-2 right-2 text-xs font-medium ${inMonth ? "text-slate-400" : "text-slate-600"}">${dom}</span>
           ${centerBlock}
         </button>`;
@@ -1034,6 +1162,7 @@ let modalScreenshotDataUrl = null;
 let modalCurrentId = null;
 
 async function openModal(tradeId) {
+  closeMetaPopover();
   const t = state.trades.find((x) => x.id === tradeId);
   if (!t) return;
   state.detailTrade = t;
