@@ -611,7 +611,7 @@ function bind() {
     state.equity = buildEquitySeries(balancePoints);
     state.filesLabel = `Loaded ${parts.length} file(s) · ${fills.length} fills · ${trades.length} counted round trips`;
     if (trades.length) {
-      state.calendarMonth = new Date(trades[trades.length - 1].closeTs);
+      state.calendarMonth = new Date(trades[0].closeTs);
     }
     state.selectedDay = null;
     render();
