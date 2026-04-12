@@ -1182,29 +1182,6 @@ function bind() {
     });
   }
 
-  document.querySelector("#auth-forgot-btn").addEventListener("click", async () => {
-    const emailVal = email();
-    if (!emailVal) {
-      msg().textContent = "Enter your email first";
-      msg().classList.remove("hidden");
-      return;
-    }
-    try {
-      await fetch(`/api/auth/forgot-password`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: emailVal })
-      });
-      msg().textContent = "Check your email for a recovery link";
-      msg().classList.remove("hidden");
-      msg().classList.remove("text-loss");
-      msg().classList.add("text-gain");
-    } catch (e) {
-      msg().textContent = e.message;
-      msg().classList.remove("hidden");
-    }
-  });
-
   $("#mobile-nav-open")?.addEventListener("click", () => openMobileNav());
   $("#mobile-nav-close")?.addEventListener("click", () => closeMobileNav());
   $("#mobile-nav-backdrop")?.addEventListener("click", () => closeMobileNav());

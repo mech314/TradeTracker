@@ -161,15 +161,17 @@ async def delete_trade(trade_id: str, user=Depends(get_current_user)):
     return res.data
 
 @app.post("/api/auth/change-password")
-async def change_password(body: dict, user=Depends(get_current_user)):
+async def change_password(body: dict = Body(...), user=Depends(get_current_user)):
     try:
         new_password = body.get("password")
         if not new_password or len(new_password) < 6:
-            raise HTTPException(status_code=400, detail="Invalid password")
+            raise HTTPException(status_code=400, detail="Password too short")
         supabase.auth.admin.update_user_by_id(user.id, {"password": new_password})
         return {"message": "Password updated successfully"}
-    except Exception:
-        raise HTTPException(status_code=400, detail="Failed to change password")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/auth/forgot-password")
 async def forgot_password(body: dict = Body(...)):
