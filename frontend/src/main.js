@@ -1651,11 +1651,13 @@ if (!isRecovery) {
         try {
           const balanceRows = await apiGetBalance();
           if (balanceRows.length) {
-            state.equity = balanceRows.map(r => ({
-              ts: r.ts,
-              dateKey: r.date_key,
-              balance: r.balance,
-            }));
+            state.equity = buildEquitySeries(
+              balanceRows.map((r) => ({
+                ts: r.ts,
+                dateKey: r.date_key,
+                balance: r.balance,
+              })),
+            );
           }
         } catch (err) {
           console.error("Failed to load balance:", err);
