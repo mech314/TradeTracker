@@ -100,3 +100,33 @@ export async function apiDeleteTrade(tradeId) {
     if (!res.ok) throw new Error("Failed to delete trade");
     return res.json();
   }
+
+// --- Account ---
+
+export async function apiChangePassword(password) {
+    const res = await fetch(`${API}/api/auth/change-password`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ password })
+    });
+    if (!res.ok) throw new Error("Failed to change password");
+    return res.json();
+}
+
+export async function apiDeleteAllTrades() {
+    const res = await fetch(`${API}/api/account/trades`, {
+        method: "DELETE",
+        headers: authHeaders()
+    });
+    if (!res.ok) throw new Error("Failed to delete all trades");
+    return res.json();
+}
+
+export async function apiDeleteAccount() {
+    const res = await fetch(`${API}/api/account`, {
+        method: "DELETE",
+        headers: authHeaders()
+    });
+    if (!res.ok) throw new Error("Failed to delete account");
+    return res.json();
+}

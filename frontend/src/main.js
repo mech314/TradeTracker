@@ -4,7 +4,11 @@ import {
   buildRoundTripTrades,
   buildEquitySeries,
 } from "./engine.js";
-import { computeMetrics, formatPct, formatUsd } from "./metrics.js";
+import { 
+  computeMetrics, 
+  formatPct, 
+  formatUsd } 
+  from "./metrics.js";
 import {
   renderEquityChart,
   renderCumulativeReturnSparkline,
@@ -15,9 +19,24 @@ import {
   emptyTradeMeta,
   blobToDataUrl,
 } from "./storage.js";
-
-import { isLoggedIn, login, register, logout } from "./auth.js";
-import { apiGetAllMeta, apiUpsertMeta, apiDeleteMeta, apiUploadScreenshot, apiUpsertTrades, apiGetTrades, apiDeleteTrade } from "./api.js";
+import { 
+  isLoggedIn, 
+  login, 
+  register, 
+  logout } 
+  from "./auth.js";
+import { 
+  apiGetAllMeta, 
+  apiUpsertMeta, 
+  apiDeleteMeta, 
+  apiUploadScreenshot, 
+  apiUpsertTrades, 
+  apiGetTrades, 
+  apiDeleteTrade, 
+  apiChangePassword, 
+  apiDeleteAllTrades, 
+  apiDeleteAccount } 
+  from "./api.js";
 
 function showAuthScreen() {
   document.querySelector("#app").innerHTML = `
@@ -421,6 +440,54 @@ function mergeExtracts(parts) {
   return { fills, balancePoints };
 }
 
+function accountPageHtml() {
+  return `
+    <section class="max-w-lg space-y-6">
+      <div class="rounded-xl border border-slate-800 bg-surface-raised p-5 space-y-4">
+        <h2 class="text-sm font-medium text-slate-400">Account</h2>
+        <p class="text-sm text-slate-300" id="account-email"></p>
+      </div>
+
+      <div class="rounded-xl border border-slate-800 bg-surface-raised p-5 space-y-4">
+        <h2 class="text-sm font-medium text-slate-400">Change password</h2>
+        <input type="password" id="new-password" placeholder="New password"
+          class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent" />
+        <input type="password" id="confirm-password" placeholder="Confirm password"
+          class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent" />
+        <button type="button" id="change-password-btn"
+          class="w-full py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-blue-500 transition-colors">
+          Update password
+        </button>
+        <p id="password-msg" class="hidden text-sm"></p>
+      </div>
+
+      <div class="rounded-xl border border-red-900/40 bg-surface-raised p-5 space-y-4">
+        <h2 class="text-sm font-medium text-red-400">Danger zone</h2>
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm text-slate-300">Delete all trades</p>
+            <p class="text-xs text-slate-500">Removes all trades and meta data. Cannot be undone.</p>
+          </div>
+          <button type="button" id="delete-trades-btn"
+            class="px-4 py-2 rounded-lg bg-loss/15 text-loss text-sm border border-loss/30 hover:bg-loss/25 transition-colors">
+            Delete all
+          </button>
+        </div>
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm text-slate-300">Delete account</p>
+            <p class="text-xs text-slate-500">Permanently deletes your account and all data.</p>
+          </div>
+          <button type="button" id="delete-account-btn"
+            class="px-4 py-2 rounded-lg bg-loss/15 text-loss text-sm border border-loss/30 hover:bg-loss/25 transition-colors">
+            Delete account
+          </button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function render() {
   closeMobileNav();
   const root = $("#app");
@@ -504,7 +571,7 @@ function render() {
             ${calendarTableTrades.map((t) => tradeMobileCardHtml(t)).join("")}
           </div>
         </section>`;
-
+        
   const navBtn = (page, label) => {
     const active = state.page === page;
     return `<button type="button" data-nav-page="${page}" class="w-full text-left px-3 py-2.5 text-sm rounded-lg transition-colors ${
@@ -516,6 +583,7 @@ function render() {
   root.innerHTML = `
     <div class="min-h-screen flex">
     <aside class="hidden lg:flex w-56 lg:w-64 shrink-0 min-h-screen self-stretch flex-col bg-slate-900 border-r border-slate-700 p-3 lg:p-4 text-sm text-slate-300">
+      ${navBtn("account", "Account")}
       ${navBtn("dashboard", "Dashboard")}
       ${navBtn("calendar", "Calendar")}
     </aside>
@@ -546,6 +614,7 @@ function render() {
       <p class="text-sm text-slate-500" id="file-status">${state.filesLabel}</p>
 
       ${state.page === "dashboard" ? dashboardStatsHtml : ""}
+      ${state.page === "account" ? accountPageHtml() : ""}
 
       <section class="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
@@ -1055,6 +1124,58 @@ function bind() {
     $("#modal-preview")?.classList.remove("hidden");
     $("#modal-clear-shot")?.classList.remove("hidden");
   });
+
+  if (state.page === "account") {
+    const emailEl = $("#account-email");
+    if (emailEl) emailEl.textContent = localStorage.getItem("user_email") ?? "";
+  
+    $("#change-password-btn")?.addEventListener("click", async () => {
+      const pwd = $("#new-password").value;
+      const confirm = $("#confirm-password").value;
+      const msg = $("#password-msg");
+      if (pwd !== confirm) {
+        msg.textContent = "Passwords do not match";
+        msg.className = "text-sm text-loss";
+        msg.classList.remove("hidden");
+        return;
+      }
+      try {
+        await apiChangePassword(pwd);
+        msg.textContent = "Password updated";
+        msg.className = "text-sm text-gain";
+        msg.classList.remove("hidden");
+      } catch (e) {
+        msg.textContent = e.message;
+        msg.className = "text-sm text-loss";
+        msg.classList.remove("hidden");
+      }
+    });
+  
+    $("#delete-trades-btn")?.addEventListener("click", async () => {
+      if (!confirm("Delete all trades? This cannot be undone.")) return;
+      try {
+        await apiDeleteAllTrades();
+        state.trades = [];
+        state.metrics = null;
+        state.tradeMetaById.clear();
+        state.screenshotUrls.clear();
+        state.filesLabel = "No files loaded";
+        render();
+      } catch (e) {
+        alert(e.message);
+      }
+    });
+  
+    $("#delete-account-btn")?.addEventListener("click", async () => {
+      if (!confirm("Delete your account and all data permanently?")) return;
+      try {
+        await apiDeleteAccount();
+        logout();
+      } catch (e) {
+        alert(e.message);
+      }
+    });
+  }
 
   $("#mobile-nav-open")?.addEventListener("click", () => openMobileNav());
   $("#mobile-nav-close")?.addEventListener("click", () => closeMobileNav());

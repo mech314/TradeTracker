@@ -25,6 +25,7 @@ export async function login(email, password) {
     if (!res.ok) throw new Error('Invalid credentials');
     const data = await res.json();
     setToken(data.access_token);
+    localStorage.setItem("user_email", data.user);
     return data.user;
     }
 
