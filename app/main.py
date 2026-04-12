@@ -234,7 +234,7 @@ async def upsert_balance(snapshots: list[BalanceSnapshot], user=Depends(get_curr
 
 @app.get("/api/balance")
 async def get_balance(user=Depends(get_current_user)):
-    res = supabase_admin.table("balance_snapshots").select("*").eq("user_id", user.id).order("ts").execute()
+    res = supabase_admin.table("balance_snapshots").select("*").eq("user_id", user.id).order("ts").limit(10000).execute()
     return res.data
 
 if STATIC.is_dir():
