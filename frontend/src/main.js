@@ -1628,7 +1628,7 @@ if (!isRecovery) {
   if (!isLoggedIn()) {
     showAuthScreen();
   } else {
-    apiGetTrades().then(rows => {
+    apiGetTrades().then(async rows => {
       if (rows.length) {
         state.trades = rows.map(r => ({
           id: r.id,
@@ -1647,6 +1647,7 @@ if (!isRecovery) {
         state.metrics = computeMetrics(state.trades);
         state.calendarMonth = new Date(state.trades[state.trades.length - 1].closeTs);
         state.filesLabel = `${state.trades.length} trades loaded from database`;
+
         try {
           const balanceRows = await apiGetBalance();
           if (balanceRows.length) {
