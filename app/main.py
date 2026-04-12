@@ -21,7 +21,10 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
+# Anon (publishable) key: Auth API (sign-in, get_user(jwt), password reset email).
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+# Service role: PostgREST + Storage bypass RLS. Only use after get_current_user;
+# always scope queries with .eq("user_id", user.id) (or equivalent).
 supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 app = FastAPI(title="TradeTracker")
@@ -98,12 +101,12 @@ async def login(body: AuthRequest):
 
 @app.get("/api/meta")
 async def get_all_meta(user=Depends(get_current_user)):
-    res = supabase.table("trade_meta").select("*").eq("user_id", user.id).execute()
+    res = supabase_admin.table("trade_meta").select("*").eq("user_id", user.id).execute()
     return res.data
 
 @app.post("/api/meta")
 async def upsert_meta(request: TradeMetaUpset, user=Depends(get_current_user)):
-    res = supabase.table("trade_meta").upsert({
+    res = supabase_admin.table("trade_meta").upsert({
         "trade_id": request.trade_id,
         "notes": request.notes,
         "risk_per_share": request.risk_per_share,
@@ -114,7 +117,7 @@ async def upsert_meta(request: TradeMetaUpset, user=Depends(get_current_user)):
 
 @app.delete("/api/meta/{trade_id}")
 async def delete_meta(trade_id: str, user=Depends(get_current_user)):
-    res = supabase.table("trade_meta").delete().eq("trade_id", trade_id).eq("user_id", user.id).execute()
+    res = supabase_admin.table("trade_meta").delete().eq("trade_id", trade_id).eq("user_id", user.id).execute()
     return res.data
 
 @app.post("/api/screenshots/upload")
@@ -123,12 +126,12 @@ async def upload_screenshot(file: UploadFile = File(...), user=Depends(get_curre
         content = await file.read()
         ext = file.filename.split(".")[-1]
         filename = f"{user.id}/{uuid.uuid4()}.{ext}"
-        supabase.storage.from_("screenshots").upload(
+        supabase_admin.storage.from_("screenshots").upload(
             filename,
             content,
             {"content-type": file.content_type}
         )
-        url = supabase.storage.from_("screenshots").get_public_url(filename)
+        url = supabase_admin.storage.from_("screenshots").get_public_url(filename)
         return {"url": url}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -152,17 +155,17 @@ async def upsert_trades(trades: list[RoundTrip], user=Depends(get_current_user))
         }
         for t in trades
     ]
-    res = supabase.table("round_trips").upsert(rows).execute()
+    res = supabase_admin.table("round_trips").upsert(rows).execute()
     return res.data
 
 @app.get("/api/trades")
 async def get_trades(user=Depends(get_current_user)):
-    res = supabase.table("round_trips").select("*").eq("user_id", user.id).order("close_ts").execute()
+    res = supabase_admin.table("round_trips").select("*").eq("user_id", user.id).order("close_ts").execute()
     return res.data
 
 @app.delete("/api/trades/{trade_id}")
 async def delete_trade(trade_id: str, user=Depends(get_current_user)):
-    res = supabase.table("round_trips").delete().eq("id", trade_id).eq("user_id", user.id).execute()
+    res = supabase_admin.table("round_trips").delete().eq("id", trade_id).eq("user_id", user.id).execute()
     return res.data
 
 @app.post("/api/auth/change-password")
@@ -192,16 +195,19 @@ async def forgot_password(body: dict = Body(...)):
 
 @app.delete("/api/account/trades")
 async def delete_all_trades(user=Depends(get_current_user)):
-    supabase.table("round_trips").delete().eq("user_id", user.id).execute()
-    supabase.table("trade_meta").delete().eq("user_id", user.id).execute()
+    supabase_admin.table("round_trips").delete().eq("user_id", user.id).execute()
+    supabase_admin.table("trade_meta").delete().eq("user_id", user.id).execute()
     return {"message": "All trades and meta data deleted successfully"}
 
 @app.delete("/api/account")
 async def delete_account(user=Depends(get_current_user)):
-    supabase.table("round_trips").delete().eq("user_id", user.id).execute()
-    supabase.table("trade_meta").delete().eq("user_id", user.id).execute()
-    supabase.storage.from_("screenshots").delete(f"{user.id}/")
-    supabase.auth.admin.delete_user(user.id)
+    supabase_admin.table("round_trips").delete().eq("user_id", user.id).execute()
+    supabase_admin.table("trade_meta").delete().eq("user_id", user.id).execute()
+    try:
+        supabase_admin.storage.from_("screenshots").remove([f"{user.id}/"])
+    except Exception as e:
+        logger.warning("Storage cleanup for user %s: %s", user.id, e)
+    supabase_admin.auth.admin.delete_user(user.id)
     return {"message": "Account deleted successfully"}
 
 if STATIC.is_dir():
