@@ -155,6 +155,11 @@ async def get_trades(user=Depends(get_current_user)):
     res = supabase.table("round_trips").select("*").eq("user_id", user.id).order("close_ts").execute()
     return res.data
 
+@app.delete("/api/trades/{trade_id}")
+async def delete_trade(trade_id: str, user=Depends(get_current_user)):
+    res = supabase.table("round_trips").delete().eq("id", trade_id).eq("user_id", user.id).execute()
+    return res.data
+
 if STATIC.is_dir():
     app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
 
