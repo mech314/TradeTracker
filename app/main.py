@@ -1,15 +1,14 @@
 import os
 import uuid
 from pathlib import Path
+from typing import Optional
+from pydantic import BaseModel
+from supabase import create_client, Client
 
-from fastapi import FastAPI, HTTPException, Depends, Security
+from fastapi import FastAPI, HTTPException, Depends, Security, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi import UploadFile, File
-from pydantic import BaseModel
-from typing import Optional
-from supabase import create_client, Client
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -32,6 +31,29 @@ app.add_middleware(
 
 security = HTTPBearer()
 
+class TradeMetaUpset(BaseModel):
+    trade_id: str
+    notes: Optional[str] = None
+    risk_per_share: Optional[float] = None
+    screenshot_url: Optional[str] = None
+
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+
+class RoundTrip(BaseModel):
+    id: str
+    symbol: str
+    open_side: str
+    date_key: str
+    open_ts: int
+    close_ts: int
+    pnl: float
+    max_shares: Optional[float] = None
+    share_turnover: Optional[float] = None
+    two_way_notional: Optional[float] = None
+    return_per_dollar: Optional[float] = None
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
     try:
@@ -39,10 +61,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(
         return user.user
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-
-class AuthRequest(BaseModel):
-    email: str
-    password: str
 
 @app.get("/api/health")
 def health():
@@ -72,12 +90,6 @@ async def login(body: AuthRequest):
         }
     except Exception:
         raise HTTPException(status_code=400, detail="Failed to login")
-
-class TradeMetaUpset(BaseModel):
-    trade_id: str
-    notes: Optional[str] = None
-    risk_per_share: Optional[float] = None
-    screenshot_url: Optional[str] = None
 
 @app.get("/api/meta")
 async def get_all_meta(user=Depends(get_current_user)):
@@ -115,6 +127,34 @@ async def upload_screenshot(file: UploadFile = File(...), user=Depends(get_curre
         return {"url": url}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/trades")
+async def upsert_trades(trades: list[RoundTrip], user=Depends(get_current_user)):
+    rows = [
+        {
+            "id": t.id,
+            "user_id": user.id,
+            "symbol": t.symbol,
+            "open_side": t.open_side,
+            "date_key": t.date_key,
+            "open_ts": t.open_ts,
+            "close_ts": t.close_ts,
+            "pnl": t.pnl,
+            "max_shares": t.max_shares,
+            "share_turnover": t.share_turnover,
+            "two_way_notional": t.two_way_notional,
+            "return_per_dollar": t.return_per_dollar,
+        }
+        for t in trades
+    ]
+    res = supabase.table("round_trips").upsert(rows).execute()
+    return res.data
+
+@app.get("/api/trades")
+async def get_trades(user=Depends(get_current_user)):
+    res = supabase.table("round_trips").select("*").eq("user_id", user.id).order("close_ts").execute()
+    return res.data
+
 if STATIC.is_dir():
     app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
 
