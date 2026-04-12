@@ -160,6 +160,31 @@ async def delete_trade(trade_id: str, user=Depends(get_current_user)):
     res = supabase.table("round_trips").delete().eq("id", trade_id).eq("user_id", user.id).execute()
     return res.data
 
+@app.post("/api/auth/change-password")
+async def change_password(body: dick, user=Depends(get_current_user)):
+    try:
+        new_password = body.get("password")
+        if not new_password or len(new_password) < 6:
+            raise HTTPException(status_code=400, detail="Invalid password")
+        supabase.auth.admin.update_user_by_id(user.id, {"password": new_password})
+        return {"message": "Password updated successfully"}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Failed to change password")
+
+@app.delete("/api/account/trades")
+async def delete_all_trades(user=Depends(get_current_user)):
+    supabase.table("round_trips").delete().eq("user_id", user.id).execute()
+    supabase.table("trade_meta").delete().eq("user_id", user.id).execute()
+    return {"message": "All trades and meta data deleted successfully"}
+
+@app.delete("/api/account")
+async def delete_account(user=Depends(get_current_user)):
+    supabase.table("round_trips").delete().eq("user_id", user.id).execute()
+    supabase.table("trade_meta").delete().eq("user_id", user.id).execute()
+    supabase.storage.from_("screenshots").delete(f"{user.id}/")
+    supabase.auth.admin.delete_user(user.id)
+    return {"message": "Account deleted successfully"}
+
 if STATIC.is_dir():
     app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
 
