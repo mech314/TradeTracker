@@ -1,4 +1,5 @@
 import "./style.css";
+import "./reset-password.js";
 import {
   extractFillsAndBalances,
   buildRoundTripTrades,
