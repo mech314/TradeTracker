@@ -153,9 +153,58 @@ function monthDateKeyRange(y, mo) {
   return { start, end };
 }
 
+/** API / DB may return `2025-12-03` or ISO timestamps; month filters assume `YYYY-MM-DD`. */
+function normalizeDateKey(k) {
+  if (k == null) return "";
+  const s = String(k);
+  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
+}
+
+/**
+ * Balance snapshots for the calendar month, with carry-forward so the line chart
+ * always has a path (strict date-in-month filtering often yields [] because CSV
+ * balance rows are sparse).
+ */
 function equitySeriesForMonth(series, y, mo) {
   const { start, end } = monthDateKeyRange(y, mo);
-  return series.filter((p) => p.dateKey >= start && p.dateKey <= end);
+  const pts = series
+    .map((p) => ({
+      dateKey: normalizeDateKey(p.dateKey),
+      balance: p.balance,
+    }))
+    .filter((p) => p.dateKey && Number.isFinite(p.balance));
+  pts.sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+
+  const inMonth = pts.filter((p) => p.dateKey >= start && p.dateKey <= end);
+  const before = pts.filter((p) => p.dateKey < start);
+  const prior = before.length ? before[before.length - 1] : null;
+
+  if (inMonth.length === 0) {
+    if (!prior) return [];
+    return [
+      { dateKey: start, balance: prior.balance },
+      { dateKey: end, balance: prior.balance },
+    ];
+  }
+
+  const out = [];
+  const firstIn = inMonth[0];
+  const openBal =
+    prior && firstIn.dateKey > start
+      ? prior.balance
+      : firstIn.balance;
+  if (firstIn.dateKey > start) {
+    out.push({ dateKey: start, balance: openBal });
+  }
+  for (const p of inMonth) {
+    if (out.length && out[out.length - 1].dateKey === p.dateKey) continue;
+    out.push({ dateKey: p.dateKey, balance: p.balance });
+  }
+  const last = out[out.length - 1];
+  if (last.dateKey < end) {
+    out.push({ dateKey: end, balance: last.balance });
+  }
+  return out;
 }
 
 function tradesClosedInMonth(trades, y, mo) {
@@ -554,7 +603,8 @@ function render() {
     </section>`;
 
   const calendarHtml = `
-    <section class="rounded-xl border border-slate-800 bg-surface-raised p-4">
+    <section class="space-y-6">
+        <section class="rounded-xl border border-slate-800 bg-surface-raised p-4">
           <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
             <h2 class="text-sm font-medium text-slate-400">Calendar</h2>
             <div class="flex items-center gap-1 sm:gap-2 flex-wrap justify-end">
@@ -568,6 +618,12 @@ function render() {
             <div id="calendar-grid" class="space-y-2 text-sm min-w-[640px]"></div>
           </div>
         </section>
+
+        <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
+          <h2 class="text-sm font-medium text-slate-400 mb-1">Equity curve</h2>
+          <p class="text-xs text-slate-600 mb-3">Account balance for the selected month only (not all-time).</p>
+          <div class="h-52 sm:h-64"><canvas id="chart-equity"></canvas></div>
+        </div>
 
         <section class="rounded-xl border border-slate-800 bg-surface-raised overflow-hidden">
           <div class="px-4 py-3 border-b border-slate-800 flex flex-wrap justify-between gap-2">
@@ -600,7 +656,8 @@ function render() {
           <div id="trades-mobile-cards" class="md:hidden p-3 space-y-3 bg-surface-raised">
             ${calendarTableTrades.map((t) => tradeMobileCardHtml(t)).join("")}
           </div>
-        </section>`;
+        </section>
+    </section>`;
         
   const navBtn = (page, label) => {
     const active = state.page === page;
@@ -646,11 +703,12 @@ function render() {
       ${state.page === "dashboard" ? dashboardStatsHtml : ""}
       ${state.page === "account" ? accountPageHtml() : ""}
 
-      <section class="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      <section class="grid grid-cols-1 gap-6 ${state.page === "calendar" ? "lg:grid-cols-2" : "lg:grid-cols-3"}">
+        ${state.page !== "calendar" ? `
         <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
           <h2 class="text-sm font-medium text-slate-400 mb-3">Equity curve</h2>
           <div class="h-52 sm:h-64"><canvas id="chart-equity"></canvas></div>
-        </div>
+        </div>` : ""}
         <section class="rounded-xl border border-slate-800 bg-surface-raised p-4 sm:p-5 min-w-0" id="equity-kpi-section">
           <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
             <h2 class="text-sm font-medium text-slate-400">Statistics</h2>
