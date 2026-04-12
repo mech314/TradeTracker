@@ -19,8 +19,10 @@ STATIC = ROOT / "static"
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
+SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 app = FastAPI(title="TradeTracker")
 
@@ -169,7 +171,7 @@ async def change_password(body: dict = Body(...), user=Depends(get_current_user)
         new_password = body.get("password")
         if not new_password or len(new_password) < 6:
             raise HTTPException(status_code=400, detail="Password too short")
-        supabase.auth.admin.update_user_by_id(user.id, {"password": new_password})
+        supabase_admin.auth.admin.update_user_by_id(user.id, {"password": new_password})
         return {"message": "Password updated successfully"}
     except HTTPException:
         raise
