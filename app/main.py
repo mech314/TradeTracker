@@ -64,7 +64,7 @@ class RoundTrip(BaseModel):
 
 class BalanceSnapshot(BaseModel):
     ts: int
-    data_key: str
+    date_key: str
     balance: float
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
