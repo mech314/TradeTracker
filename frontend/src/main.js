@@ -1594,28 +1594,29 @@ if (!isRecovery) {
     showAuthScreen();
   } else {
     apiGetTrades().then(rows => {
-    if (rows.length) {
-      state.trades = rows.map(r => ({
-        id: r.id,
-        symbol: r.symbol,
-        openSide: r.open_side,
-        dateKey: r.date_key,
-        openTs: r.open_ts,
-        closeTs: r.close_ts,
-        pnl: r.pnl,
-        maxShares: r.max_shares,
-        shareTurnover: r.share_turnover,
-        twoWayNotional: r.two_way_notional,
-        returnPerDollar: r.return_per_dollar,
-        win: r.pnl > 0,
-      }));
-      state.metrics = computeMetrics(state.trades);
-      state.calendarMonth = new Date(state.trades[state.trades.length - 1].closeTs);
-      state.filesLabel = `${state.trades.length} trades loaded from database`;
-    }
-    hydrateTradeMeta().then(() => render());
-  }).catch(err => {
-    console.error("Failed to load trades:", err);
-    render();
-  });
+      if (rows.length) {
+        state.trades = rows.map(r => ({
+          id: r.id,
+          symbol: r.symbol,
+          openSide: r.open_side,
+          dateKey: r.date_key,
+          openTs: r.open_ts,
+          closeTs: r.close_ts,
+          pnl: r.pnl,
+          maxShares: r.max_shares,
+          shareTurnover: r.share_turnover,
+          twoWayNotional: r.two_way_notional,
+          returnPerDollar: r.return_per_dollar,
+          win: r.pnl > 0,
+        }));
+        state.metrics = computeMetrics(state.trades);
+        state.calendarMonth = new Date(state.trades[state.trades.length - 1].closeTs);
+        state.filesLabel = `${state.trades.length} trades loaded from database`;
+      }
+      hydrateTradeMeta().then(() => render());
+    }).catch(err => {
+      console.error("Failed to load trades:", err);
+      render();
+    });
+  }
 }
