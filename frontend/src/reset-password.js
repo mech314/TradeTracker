@@ -1,3 +1,5 @@
+export const isPasswordRecovery = !!(accessToken && type === "recovery");
+
 import { setToken } from "./auth.js";
 import { apiChangePassword } from "./api.js";
 

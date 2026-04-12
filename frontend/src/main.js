@@ -1,5 +1,6 @@
 import "./style.css";
 import "./reset-password.js";
+import { isPasswordRecovery } from "./reset-password.js";
 import {
   extractFillsAndBalances,
   buildRoundTripTrades,
@@ -604,12 +605,6 @@ function render() {
 
   const calendarHtml = `
     <section class="space-y-6">
-        <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
-          <h2 class="text-sm font-medium text-slate-400 mb-1">Equity curve</h2>
-          <p class="text-xs text-slate-600 mb-3">Account balance for the calendar month below (not all-time).</p>
-          <div class="h-52 sm:h-64"><canvas id="chart-equity"></canvas></div>
-        </div>
-
         <section class="rounded-xl border border-slate-800 bg-surface-raised p-4">
           <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
             <h2 class="text-sm font-medium text-slate-400">Calendar</h2>
@@ -703,12 +698,12 @@ function render() {
       ${state.page === "dashboard" ? dashboardStatsHtml : ""}
       ${state.page === "account" ? accountPageHtml() : ""}
 
-      <section class="grid grid-cols-1 gap-6 ${state.page === "calendar" ? "lg:grid-cols-2" : "lg:grid-cols-3"}">
-        ${state.page !== "calendar" ? `
+      <section class="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
-          <h2 class="text-sm font-medium text-slate-400 mb-3">Equity curve</h2>
+          <h2 class="text-sm font-medium text-slate-400 ${state.page === "calendar" ? "mb-1" : "mb-3"}">Equity curve</h2>
+          ${state.page === "calendar" ? `<p class="text-xs text-slate-600 mb-2">Account balance for the selected month (same scope as Statistics).</p>` : ""}
           <div class="h-52 sm:h-64"><canvas id="chart-equity"></canvas></div>
-        </div>` : ""}
+        </div>
         <section class="rounded-xl border border-slate-800 bg-surface-raised p-4 sm:p-5 min-w-0" id="equity-kpi-section">
           <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
             <h2 class="text-sm font-medium text-slate-400">Statistics</h2>
@@ -1682,7 +1677,7 @@ window.addEventListener("resize", () => {
 
 const isRecovery = new URLSearchParams(window.location.hash.slice(1)).get("type") === "recovery";
 
-if (!isRecovery) {
+if (!isPasswordRecovery) {
   if (!isLoggedIn()) {
     showAuthScreen();
   } else {
