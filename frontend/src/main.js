@@ -1,5 +1,4 @@
 import "./style.css";
-import "./reset-password.js";
 import { isPasswordRecovery } from "./reset-password.js";
 import {
   extractFillsAndBalances,
@@ -1674,8 +1673,6 @@ window.addEventListener("resize", () => {
   closeTradeRowMenu();
   if (window.matchMedia("(min-width: 1024px)").matches) closeMobileNav();
 });
-
-const isRecovery = new URLSearchParams(window.location.hash.slice(1)).get("type") === "recovery";
 
 if (!isPasswordRecovery) {
   if (!isLoggedIn()) {

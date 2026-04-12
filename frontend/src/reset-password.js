@@ -1,5 +1,3 @@
-export const isPasswordRecovery = !!(accessToken && type === "recovery");
-
 import { setToken } from "./auth.js";
 import { apiChangePassword } from "./api.js";
 
@@ -7,7 +5,11 @@ const hashParams = new URLSearchParams(window.location.hash.slice(1));
 const accessToken = hashParams.get("access_token");
 const type = hashParams.get("type");
 
+/** True when this load is a Supabase password-recovery session (hash still present). */
+export const isPasswordRecovery = !!(accessToken && type === "recovery");
+
 if (accessToken && type === "recovery") {
+  // Remove tokens from the address bar so a refresh does not re-run recovery logic.
   window.history.replaceState(null, "", window.location.pathname);
 
   document.querySelector("#app").innerHTML = `
@@ -19,7 +21,7 @@ if (accessToken && type === "recovery") {
           class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent" />
         <input type="password" id="reset-confirm" placeholder="Confirm password"
           class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent" />
-        <button id="reset-submit"
+        <button id="reset-submit" type="button"
           class="w-full py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-blue-500 transition-colors">
           Update password
         </button>
@@ -43,7 +45,9 @@ if (accessToken && type === "recovery") {
       msg.textContent = "Password updated! Redirecting...";
       msg.className = "text-sm text-gain";
       msg.classList.remove("hidden");
-      setTimeout(() => window.location.href = "/", 1500);
+      setTimeout(() => {
+        window.location.href = "/";
+      }, 1500);
     } catch (e) {
       msg.textContent = e.message;
       msg.className = "text-sm text-loss";
