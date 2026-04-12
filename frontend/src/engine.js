@@ -1,4 +1,4 @@
-import { splitCSVLine, parseMoney } from "./csv.js";
+import { splitCSVLine, parseMoney, coerceNumber } from "./csv.js";
 
 const LINE_RE = /^(\d{1,2}\/\d{1,2}\/\d{2}),(\d{2}:\d{2}:\d{2}),(TRD|BAL),/;
 const TRADE_DESC_RE = /^(BOT|SOLD)\s+([+-]?\d+)\s+(\S+)\s@([\d.]+)/;
@@ -154,8 +154,11 @@ export function buildEquitySeries(balancePoints) {
   if (!balancePoints.length) return [];
   const byDay = new Map();
   for (const p of balancePoints) {
+    const balance = coerceNumber(p.balance);
+    if (balance == null || !p.dateKey) continue;
     const prev = byDay.get(p.dateKey);
-    if (!prev || p.ts >= prev.ts) byDay.set(p.dateKey, p);
+    const pt = { ts: p.ts, dateKey: p.dateKey, balance };
+    if (!prev || pt.ts >= prev.ts) byDay.set(p.dateKey, pt);
   }
   const keys = [...byDay.keys()].sort();
   return keys.map((k) => ({ dateKey: k, balance: byDay.get(k).balance }));

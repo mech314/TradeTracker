@@ -11,6 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
+from dotenv import load_dotenv
+load_dotenv()
+
 
 logger = logging.getLogger(__name__)
 

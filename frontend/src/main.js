@@ -5,6 +5,7 @@ import {
   buildRoundTripTrades,
   buildEquitySeries,
 } from "./engine.js";
+import { coerceNumber } from "./csv.js";
 import { 
   computeMetrics, 
   formatPct, 
@@ -170,9 +171,9 @@ function equitySeriesForMonth(series, y, mo) {
   const pts = series
     .map((p) => ({
       dateKey: normalizeDateKey(p.dateKey),
-      balance: p.balance,
+      balance: coerceNumber(p.balance),
     }))
-    .filter((p) => p.dateKey && Number.isFinite(p.balance));
+    .filter((p) => p.dateKey && p.balance != null);
   pts.sort((a, b) => a.dateKey.localeCompare(b.dateKey));
 
   const inMonth = pts.filter((p) => p.dateKey >= start && p.dateKey <= end);

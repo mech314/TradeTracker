@@ -5,3 +5,4 @@ __pycache__/
 frontend/dist/
 static/*
 !static/.gitkeep
+.env
