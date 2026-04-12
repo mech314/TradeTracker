@@ -1587,10 +1587,13 @@ window.addEventListener("resize", () => {
   if (window.matchMedia("(min-width: 1024px)").matches) closeMobileNav();
 });
 
-if (!isLoggedIn()) {
-  showAuthScreen();
-} else {
-  apiGetTrades().then(rows => {
+const isRecovery = new URLSearchParams(window.location.hash.slice(1)).get("type") === "recovery";
+
+if (!isRecovery) {
+  if (!isLoggedIn()) {
+    showAuthScreen();
+  } else {
+    apiGetTrades().then(rows => {
     if (rows.length) {
       state.trades = rows.map(r => ({
         id: r.id,
