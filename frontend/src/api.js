@@ -59,3 +59,35 @@ export async function apiUploadScreenshot(file) {
     const data = await res.json();
     return data.url;
 }
+
+// --- Trades ---
+
+export async function apiUpsertTrades(trades) {
+    const res = await fetch(`${API}/api/trades`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(trades.map(t => ({
+            id: t.id,
+            symbol: t.symbol,
+            open_side: t.openSide,
+            date_key: t.dateKey,
+            open_ts: t.openTs,
+            close_ts: t.closeTs,
+            pnl: t.pnl,
+            max_shares: t.maxShares,
+            share_turnover: t.shareTurnover,
+            two_way_notional: t.twoWayNotional,
+            return_per_dollar: t.returnPerDollar,
+        })))
+    });
+    if (!res.ok) throw new Error("Failed to save trades");
+    return res.json();
+}
+
+export async function apiGetTrades() {
+    const res = await fetch(`${API}/api/trades`, {
+        headers: authHeaders()
+    });
+    if (!res.ok) throw new Error("Failed to fetch trades");
+    return res.json();
+}

@@ -17,7 +17,7 @@ import {
 } from "./storage.js";
 
 import { isLoggedIn, login, register, logout } from "./auth.js";
-import { apiGetAllMeta, apiUpsertMeta, apiDeleteMeta, apiUploadScreenshot } from "./api.js";
+import { apiGetAllMeta, apiUpsertMeta, apiDeleteMeta, apiUploadScreenshot, apiUpsertTrades, apiGetTrades } from "./api.js";
 
 function showAuthScreen() {
   document.querySelector("#app").innerHTML = `
@@ -942,6 +942,11 @@ function bind() {
     const { fills, balancePoints } = mergeExtracts(parts);
     const trades = buildRoundTripTrades(fills);
     state.trades = trades;
+    try {
+      await apiUpsertTrades(trades);
+    } catch (err) {
+        console.error("Failed to save trades:", err);
+    }
     state.fileLoadInfo = { fileCount: parts.length, fillCount: fills.length };
     await hydrateTradeMeta();
     state.metrics = computeMetrics(trades);
