@@ -17,7 +17,7 @@ import {
 } from "./storage.js";
 
 import { isLoggedIn, login, register, logout } from "./auth.js";
-import { apiGetAllMeta, apiUpsertMeta, apiDeleteMeta, apiUploadScreenshot, apiUpsertTrades, apiGetTrades } from "./api.js";
+import { apiGetAllMeta, apiUpsertMeta, apiDeleteMeta, apiUploadScreenshot, apiUpsertTrades, apiGetTrades, apiDeleteTrade } from "./api.js";
 
 function showAuthScreen() {
   document.querySelector("#app").innerHTML = `
@@ -1337,14 +1337,13 @@ function closeModal() {
 async function performDeleteTrade(id) {
   closeTradeRowMenu();
   try {
-    await apiDeleteMeta(id);
+    await Promise.all([
+      apiDeleteMeta(id),
+      apiDeleteTrade(id),
+    ]);
   } catch (err) {
     console.error(err);
-    alert(
-      err?.message
-        ? `Could not delete saved data: ${err.message}`
-        : "Could not delete saved data.",
-    );
+    alert(err?.message ? `Could not delete saved data: ${err.message}` : "Could not delete saved data.");
     return;
   }
   const prevUrl = state.screenshotUrls.get(id);
@@ -1485,7 +1484,7 @@ if (!isLoggedIn()) {
         win: r.pnl > 0,
       }));
       state.metrics = computeMetrics(state.trades);
-      state.calendarMonth = new Date(state.trades[0].closeTs);
+      state.calendarMonth = new Date(state.trades[state.trades.length - 1].closeTs);
       state.filesLabel = `${state.trades.length} trades loaded from database`;
     }
     hydrateTradeMeta().then(() => render());

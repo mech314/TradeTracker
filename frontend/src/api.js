@@ -91,3 +91,12 @@ export async function apiGetTrades() {
     if (!res.ok) throw new Error("Failed to fetch trades");
     return res.json();
 }
+
+export async function apiDeleteTrade(tradeId) {
+    const res = await fetch(`${API}/api/trades/${encodeURIComponent(tradeId)}`, {
+        method: "DELETE",
+        headers: authHeaders()
+    });
+    if (!res.ok) throw new Error("Failed to delete trade");
+    return res.json();
+  }
