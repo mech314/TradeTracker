@@ -1,5 +1,6 @@
 import os
 import uuid
+import logging
 from pathlib import Path
 from typing import Optional
 from pydantic import BaseModel
@@ -10,6 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
@@ -171,6 +174,7 @@ async def change_password(body: dict = Body(...), user=Depends(get_current_user)
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Change password error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/auth/forgot-password")
