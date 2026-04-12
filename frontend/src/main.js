@@ -12,15 +12,12 @@ import {
   destroyChart,
 } from "./charts.js";
 import {
-  loadTradeMeta,
-  saveTradeMeta,
-  loadAllTradeMeta,
   emptyTradeMeta,
   blobToDataUrl,
-  deleteTradeMeta,
 } from "./storage.js";
 
 import { isLoggedIn, login, register, logout } from "./auth.js";
+import { apiGetAllMeta, apiUpsertMeta, apiDeleteMeta, apiUploadScreenshot } from "./api.js";
 
 function showAuthScreen() {
   document.querySelector("#app").innerHTML = `
@@ -366,7 +363,14 @@ async function persistRiskFromInput(tradeId, inputEl) {
   inputEl.classList.remove("ring-1", "ring-loss");
   let merged;
   try {
-    merged = await saveTradeMeta({ id: tradeId, riskPerShare });
+    merged = await apiUpsertMeta({
+      id: tradeId,
+      notes: state.tradeMetaById.get(tradeId)?.notes ?? null,
+      riskPerShare,
+      screenshotUrl: state.tradeMetaById.get(tradeId)?.screenshotUrl ?? null,
+    });
+    const existing = state.tradeMetaById.get(tradeId) || emptyTradeMeta(tradeId);
+    merged = { ...existing, riskPerShare };
   } catch (err) {
     console.error(err);
     alert(err?.message ? `Save failed: ${err.message}` : "Save failed.");
@@ -712,12 +716,25 @@ function hasScreenshotStored(meta) {
 async function hydrateTradeMeta() {
   revokeAllScreenshotUrls();
   state.tradeMetaById.clear();
-  const rows = await loadAllTradeMeta();
-  for (const r of rows) {
-    const id = r.id;
-    const m = { ...emptyTradeMeta(id), ...r, id };
-    state.tradeMetaById.set(id, m);
-    refreshScreenshotSrcForTrade(id, m.screenshot);
+  try {
+    const rows = await apiGetAllMeta();
+    for (const r of rows) {
+      const id = r.trade_id;
+      const m = {
+        ...emptyTradeMeta(id),
+        id,
+        notes: r.notes || "",
+        riskPerShare: r.risk_per_share ?? null,
+        screenshotUrl: r.screenshot_url ?? null,
+        hasScreenshot: !!r.screenshot_url,
+      };
+      state.tradeMetaById.set(id, m);
+      if (r.screenshot_url) {
+        state.screenshotUrls.set(id, r.screenshot_url);
+      }
+    }
+  } catch (err) {
+    console.error("Failed to load meta:", err);
   }
 }
 
@@ -1037,7 +1054,7 @@ function bind() {
   $("#mobile-nav-open")?.addEventListener("click", () => openMobileNav());
   $("#mobile-nav-close")?.addEventListener("click", () => closeMobileNav());
   $("#mobile-nav-backdrop")?.addEventListener("click", () => closeMobileNav());
-  $("#logout-btn")?.addEventListener("click", () => logout()); // сюда
+  $("#logout-btn")?.addEventListener("click", () => logout());
 }
 
 function paintCharts() {
@@ -1272,17 +1289,10 @@ async function openModal(tradeId) {
   modalScreenshotExplicitlyCleared = false;
   let meta = state.tradeMetaById.get(tradeId);
   if (!meta) {
-    meta = await loadTradeMeta(tradeId);
+    meta = emptyTradeMeta(tradeId);
     state.tradeMetaById.set(tradeId, meta);
   }
-  const sh = meta.screenshot;
-  if (typeof sh === "string" && sh.startsWith("data:")) {
-    modalScreenshotDataUrl = sh;
-  } else if (sh instanceof Blob && sh.size > 0) {
-    modalScreenshotDataUrl = await blobToDataUrl(sh);
-  } else {
-    modalScreenshotDataUrl = null;
-  }
+  modalScreenshotDataUrl = meta.screenshotUrl ?? null;
 
   $("#modal").classList.remove("hidden");
   $("#modal").classList.add("flex");
@@ -1322,7 +1332,7 @@ function closeModal() {
 async function performDeleteTrade(id) {
   closeTradeRowMenu();
   try {
-    await deleteTradeMeta(id);
+    await apiDeleteMeta(id);
   } catch (err) {
     console.error(err);
     alert(
@@ -1358,7 +1368,6 @@ function clearModalShot() {
 
 async function saveModal() {
   if (!modalCurrentId) return;
-  const existing = await loadTradeMeta(modalCurrentId);
 
   const rawRisk = $("#modal-risk")?.value?.trim() ?? "";
   const patch = {
@@ -1372,30 +1381,54 @@ async function saveModal() {
     if (Number.isFinite(n) && n >= 0) patch.riskPerShare = n;
   }
 
-  if (modalScreenshotExplicitlyCleared) {
-    patch.screenshot = null;
-  } else if (
-    modalScreenshotDataUrl &&
-    typeof modalScreenshotDataUrl === "string" &&
-    modalScreenshotDataUrl.startsWith("data:")
-  ) {
-    patch.screenshot = modalScreenshotDataUrl;
-  }
-
   try {
-    const merged = await saveTradeMeta(patch);
-    state.tradeMetaById.set(modalCurrentId, merged);
-    refreshScreenshotSrcForTrade(modalCurrentId, merged.screenshot);
+    let screenshotUrl = state.tradeMetaById.get(modalCurrentId)?.screenshotUrl ?? null;
+
+    if (modalScreenshotExplicitlyCleared) {
+      screenshotUrl = null;
+    } else if (modalScreenshotDataUrl) {
+      const file = await (await fetch(modalScreenshotDataUrl)).blob();
+      const compressed = await compressImage(file);
+      screenshotUrl = await apiUploadScreenshot(compressed);
+    }
+
+    await apiUpsertMeta({
+      id: modalCurrentId,
+      notes: patch.notes,
+      riskPerShare: patch.riskPerShare ?? null,
+      screenshotUrl,
+    });
+
+    const updated = {
+      ...emptyTradeMeta(modalCurrentId),
+      ...state.tradeMetaById.get(modalCurrentId),
+      notes: patch.notes,
+      riskPerShare: patch.riskPerShare ?? null,
+      screenshotUrl,
+      hasScreenshot: !!screenshotUrl,
+    };
+    state.tradeMetaById.set(modalCurrentId, updated);
+    if (screenshotUrl) {
+      state.screenshotUrls.set(modalCurrentId, screenshotUrl);
+    } else {
+      state.screenshotUrls.delete(modalCurrentId);
+    }
     closeModal();
     render();
   } catch (err) {
     console.error(err);
-    alert(
-      err?.message
-        ? `Save failed: ${err.message}`
-        : "Save failed (IndexedDB). Check the console.",
-    );
+    alert(err?.message ? `Save failed: ${err.message}` : "Save failed.");
   }
+}
+
+async function compressImage(blob, maxWidth = 1280, quality = 0.7) {
+  const img = await createImageBitmap(blob);
+  const scale = Math.min(1, maxWidth / img.width);
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width * scale;
+  canvas.height = img.height * scale;
+  canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+  return new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", quality));
 }
 
 /** Sidebar nav: one listener on #app so it survives every `render()` (buttons are recreated each time). */
