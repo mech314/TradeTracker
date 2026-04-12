@@ -20,6 +20,58 @@ import {
   deleteTradeMeta,
 } from "./storage.js";
 
+import { isLoggedIn, login, register, logout } from "./auth.js";
+
+function showAuthScreen() {
+  document.querySelector("#app").innerHTML = `
+    <div class="min-h-screen flex items-center justify-center bg-surface p-4">
+      <div class="w-full max-w-sm rounded-xl border border-slate-800 bg-surface-raised p-6 space-y-4">
+        <h1 class="text-xl font-semibold text-white">TradeTracker</h1>
+        <p id="auth-msg" class="hidden text-sm text-loss"></p>
+        <input id="auth-email" type="email" placeholder="Email"
+          class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent" />
+        <input id="auth-password" type="password" placeholder="Password"
+          class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent" />
+        <button id="auth-login-btn"
+          class="w-full py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-blue-500 transition-colors">
+          Login
+        </button>
+        <button id="auth-register-btn"
+          class="w-full py-2 rounded-lg bg-surface-overlay text-slate-300 text-sm hover:bg-slate-800 transition-colors">
+          Register
+        </button>
+      </div>
+    </div>
+  `;
+
+  const msg = () => document.querySelector("#auth-msg");
+  const email = () => document.querySelector("#auth-email").value.trim();
+  const password = () => document.querySelector("#auth-password").value;
+
+  document.querySelector("#auth-login-btn").addEventListener("click", async () => {
+    try {
+      await login(email(), password());
+      window.location.reload();
+    } catch (e) {
+      msg().textContent = e.message;
+      msg().classList.remove("hidden");
+    }
+  });
+
+  document.querySelector("#auth-register-btn").addEventListener("click", async () => {
+    try {
+      await register(email(), password());
+      msg().textContent = "Check your email to confirm registration";
+      msg().classList.remove("hidden");
+      msg().classList.remove("text-loss");
+      msg().classList.add("text-gain");
+    } catch (e) {
+      msg().textContent = e.message;
+      msg().classList.remove("hidden");
+    }
+  });
+}
+
 const $ = (sel, el = document) => el.querySelector(sel);
 
 let state = {
@@ -1371,4 +1423,8 @@ window.addEventListener("resize", () => {
   if (window.matchMedia("(min-width: 1024px)").matches) closeMobileNav();
 });
 
-render();
+if (!isLoggedIn()) {
+  showAuthScreen();
+} else {
+  render();
+}
