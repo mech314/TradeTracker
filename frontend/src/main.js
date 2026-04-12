@@ -1561,7 +1561,8 @@ document.querySelector("#app")?.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-nav-page]");
   if (!btn) return;
   const page = btn.dataset.navPage;
-  if (page !== "dashboard" && page !== "calendar") return;
+  const validPages = ["dashboard", "calendar", "account"];
+  if (!validPages.includes(page)) return;
   closeMobileNav();
   state.page = page;
   render();
