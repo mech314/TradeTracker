@@ -171,6 +171,17 @@ async def change_password(body: dict, user=Depends(get_current_user)):
     except Exception:
         raise HTTPException(status_code=400, detail="Failed to change password")
 
+@app.post("/api/auth/forgot-password")
+async def forgot_password(body: dict = Body(...)):
+    try:
+        email = body.get("email")
+        supabase.auth.reset_password_email(email, {
+            "redirect_to": "https://tradetracker-ryd7.onrender.com"
+        })
+        return {"message": "Recovery email sent"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 @app.delete("/api/account/trades")
 async def delete_all_trades(user=Depends(get_current_user)):
     supabase.table("round_trips").delete().eq("user_id", user.id).execute()

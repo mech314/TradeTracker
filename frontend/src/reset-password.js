@@ -6,7 +6,6 @@ const accessToken = hashParams.get("access_token");
 const type = hashParams.get("type");
 
 if (accessToken && type === "recovery") {
-  setToken(accessToken);
   window.history.replaceState(null, "", window.location.pathname);
 
   document.querySelector("#app").innerHTML = `
@@ -37,6 +36,7 @@ if (accessToken && type === "recovery") {
       return;
     }
     try {
+      setToken(accessToken);
       await apiChangePassword(pwd);
       msg.textContent = "Password updated! Redirecting...";
       msg.className = "text-sm text-gain";
