@@ -77,7 +77,7 @@ class TradeMetaUpset(BaseModel):
     trade_id: str
     notes: Optional[str] = None
     risk_per_share: Optional[float] = None
-    screenshot: Optional[str] = None
+    screenshot_url: Optional[str] = None
 
 @app.get("/api/meta")
 async def get_all_meta(user=Depends(get_current_user)):
@@ -90,7 +90,7 @@ async def upsert_meta(request: TradeMetaUpset, user=Depends(get_current_user)):
         "trade_id": request.trade_id,
         "notes": request.notes,
         "risk_per_share": request.risk_per_share,
-        "screenshot": request.screenshot,
+        "screenshot_url": request.screenshot_url,
         "user_id": user.id
     }).execute()
     return res.data
