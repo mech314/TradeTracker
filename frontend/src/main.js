@@ -604,6 +604,12 @@ function render() {
 
   const calendarHtml = `
     <section class="space-y-6">
+        <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
+          <h2 class="text-sm font-medium text-slate-400 mb-1">Equity curve</h2>
+          <p class="text-xs text-slate-600 mb-3">Account balance for the calendar month below (not all-time).</p>
+          <div class="h-52 sm:h-64"><canvas id="chart-equity"></canvas></div>
+        </div>
+
         <section class="rounded-xl border border-slate-800 bg-surface-raised p-4">
           <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
             <h2 class="text-sm font-medium text-slate-400">Calendar</h2>
@@ -618,12 +624,6 @@ function render() {
             <div id="calendar-grid" class="space-y-2 text-sm min-w-[640px]"></div>
           </div>
         </section>
-
-        <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
-          <h2 class="text-sm font-medium text-slate-400 mb-1">Equity curve</h2>
-          <p class="text-xs text-slate-600 mb-3">Account balance for the selected month only (not all-time).</p>
-          <div class="h-52 sm:h-64"><canvas id="chart-equity"></canvas></div>
-        </div>
 
         <section class="rounded-xl border border-slate-800 bg-surface-raised overflow-hidden">
           <div class="px-4 py-3 border-b border-slate-800 flex flex-wrap justify-between gap-2">
