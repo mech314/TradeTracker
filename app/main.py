@@ -8,14 +8,14 @@ from supabase import create_client, Client
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
 
-SUPABASE_URL = os.environ("SUPABASE_URL")
-SUPABASE_SECRET_KEY = os.environ("SUPABASE_SECRET_KEY")
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
 app = FastAPI(title="TradeTracker")
 
-@app.get("/health")
+@app.get("/api/health")
 def health():
     return {"status": "ok"}
 
