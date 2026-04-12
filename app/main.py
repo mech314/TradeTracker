@@ -5,7 +5,7 @@ from typing import Optional
 from pydantic import BaseModel
 from supabase import create_client, Client
 
-from fastapi import FastAPI, HTTPException, Depends, Security, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, Security, UploadFile, File, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -161,7 +161,7 @@ async def delete_trade(trade_id: str, user=Depends(get_current_user)):
     return res.data
 
 @app.post("/api/auth/change-password")
-async def change_password(body: dick, user=Depends(get_current_user)):
+async def change_password(body: dict, user=Depends(get_current_user)):
     try:
         new_password = body.get("password")
         if not new_password or len(new_password) < 6:
