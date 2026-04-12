@@ -62,6 +62,11 @@ class RoundTrip(BaseModel):
     two_way_notional: Optional[float] = None
     return_per_dollar: Optional[float] = None
 
+class BalanceSnapshot(BaseModel):
+    ts: int
+    data_key: str
+    balance: float
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
     try:
@@ -209,6 +214,28 @@ async def delete_account(user=Depends(get_current_user)):
         logger.warning("Storage cleanup for user %s: %s", user.id, e)
     supabase_admin.auth.admin.delete_user(user.id)
     return {"message": "Account deleted successfully"}
+
+@app.post("/api/balance")
+async def upsert_balance(snapshots: list[BalanceSnapshot], user=Depends(get_current_user)):
+    supabase_admin.table("balance_snapshots").delete().eq("user_id", user.id).execute()
+    if not snapshots:
+        return []
+    rows = [
+        {
+            "user_id": user.id,
+            "ts": s.ts,
+            "date_key": s.date_key,
+            "balance": s.balance,
+        }
+        for s in snapshots
+    ]
+    res = supabase_admin.table("balance_snapshots").insert(rows).execute()
+    return res.data
+
+@app.get("/api/balance")
+async def get_balance(user=Depends(get_current_user)):
+    res = supabase_admin.table("balance_snapshots").select("*").eq("user_id", user.id).order("ts").execute()
+    return res.data
 
 if STATIC.is_dir():
     app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")

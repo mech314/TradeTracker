@@ -130,3 +130,25 @@ export async function apiDeleteAccount() {
     if (!res.ok) throw new Error("Failed to delete account");
     return res.json();
 }
+
+export async function apiUpsertBalance(snapshots) {
+    const res = await fetch(`${API}/api/balance`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(snapshots.map(s => ({
+            ts: s.ts,
+            date_key: s.dateKey,
+            balance: s.balance,
+        })))
+    });
+    if (!res.ok) throw new Error("Failed to save balance");
+    return res.json();
+}
+
+export async function apiGetBalance() {
+    const res = await fetch(`${API}/api/balance`, {
+        headers: authHeaders()
+    });
+    if (!res.ok) throw new Error("Failed to fetch balance");
+    return res.json();
+}

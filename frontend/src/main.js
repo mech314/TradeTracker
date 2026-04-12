@@ -36,8 +36,10 @@ import {
   apiDeleteTrade, 
   apiChangePassword, 
   apiDeleteAllTrades, 
-  apiDeleteAccount } 
-  from "./api.js";
+  apiDeleteAccount,
+  apiUpsertBalance,
+  apiGetBalance,
+} from "./api.js";
 
 function showAuthScreen() {
   document.querySelector("#app").innerHTML = `
@@ -1044,6 +1046,12 @@ function bind() {
     } catch (err) {
         console.error("Failed to save trades:", err);
     }
+    try {
+      await apiUpsertBalance(balancePoints);
+    } catch (err) {
+      console.error("Failed to save balance:", err);
+    }
+    state.fileLoadInfo = { fileCount: parts.length, fillCount: fills.length };
     state.fileLoadInfo = { fileCount: parts.length, fillCount: fills.length };
     await hydrateTradeMeta();
     state.metrics = computeMetrics(trades);
@@ -1639,6 +1647,18 @@ if (!isRecovery) {
         state.metrics = computeMetrics(state.trades);
         state.calendarMonth = new Date(state.trades[state.trades.length - 1].closeTs);
         state.filesLabel = `${state.trades.length} trades loaded from database`;
+        try {
+          const balanceRows = await apiGetBalance();
+          if (balanceRows.length) {
+            state.equity = balanceRows.map(r => ({
+              ts: r.ts,
+              dateKey: r.date_key,
+              balance: r.balance,
+            }));
+          }
+        } catch (err) {
+          console.error("Failed to load balance:", err);
+        }
       }
       hydrateTradeMeta().then(() => render());
     }).catch(err => {
