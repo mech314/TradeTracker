@@ -1629,6 +1629,7 @@ if (!isRecovery) {
     showAuthScreen();
   } else {
     apiGetTrades().then(async rows => {
+      console.log("trades loaded:", rows.length);
       if (rows.length) {
         state.trades = rows.map(r => ({
           id: r.id,
