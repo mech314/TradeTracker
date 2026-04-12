@@ -57,6 +57,10 @@ function showAuthScreen() {
           class="w-full py-2 rounded-lg bg-surface-overlay text-slate-300 text-sm hover:bg-slate-800 transition-colors">
           Register
         </button>
+        <button id="auth-forgot-btn"
+          class="w-full text-sm text-slate-500 hover:text-slate-300 transition-colors">
+          Forgot password?
+        </button>
       </div>
     </div>
   `;
@@ -1177,6 +1181,29 @@ function bind() {
       }
     });
   }
+
+  document.querySelector("#auth-forgot-btn").addEventListener("click", async () => {
+    const emailVal = email();
+    if (!emailVal) {
+      msg().textContent = "Enter your email first";
+      msg().classList.remove("hidden");
+      return;
+    }
+    try {
+      await fetch(`/api/auth/forgot-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: emailVal })
+      });
+      msg().textContent = "Check your email for a recovery link";
+      msg().classList.remove("hidden");
+      msg().classList.remove("text-loss");
+      msg().classList.add("text-gain");
+    } catch (e) {
+      msg().textContent = e.message;
+      msg().classList.remove("hidden");
+    }
+  });
 
   $("#mobile-nav-open")?.addEventListener("click", () => openMobileNav());
   $("#mobile-nav-close")?.addEventListener("click", () => closeMobileNav());
