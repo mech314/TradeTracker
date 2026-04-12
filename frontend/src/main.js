@@ -1651,6 +1651,7 @@ if (!isRecovery) {
 
         try {
           const balanceRows = await apiGetBalance();
+          console.log("balance loaded:", balanceRows.length);
           if (balanceRows.length) {
             state.equity = balanceRows.map(r => ({
               ts: r.ts,
