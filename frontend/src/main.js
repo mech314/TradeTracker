@@ -1629,7 +1629,6 @@ if (!isRecovery) {
     showAuthScreen();
   } else {
     apiGetTrades().then(async rows => {
-      console.log("trades loaded:", rows.length);
       if (rows.length) {
         state.trades = rows.map(r => ({
           id: r.id,
@@ -1651,7 +1650,6 @@ if (!isRecovery) {
 
         try {
           const balanceRows = await apiGetBalance();
-          console.log("balance loaded:", balanceRows.length);
           if (balanceRows.length) {
             state.equity = balanceRows.map(r => ({
               ts: r.ts,
@@ -1663,7 +1661,8 @@ if (!isRecovery) {
           console.error("Failed to load balance:", err);
         }
       }
-      hydrateTradeMeta().then(() => render());
+      await hydrateTradeMeta();
+      render();
     }).catch(err => {
       console.error("Failed to load trades:", err);
       render();
