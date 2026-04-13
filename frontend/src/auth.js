@@ -25,6 +25,7 @@ export async function login(email, password) {
     if (!res.ok) throw new Error('Invalid credentials');
     const data = await res.json();
     setToken(data.access_token);
+    setRefreshToken(data.refresh_token);
     localStorage.setItem("user_email", data.user);
     return data.user;
     }
@@ -41,5 +42,19 @@ export async function register(email, password) {
 
 export function logout() {
     removeToken();
+    removeRefreshToken();
+    localStorage.removeItem("user_email");
     window.location.reload();
+}
+
+export function setRefreshToken(token) {
+    localStorage.setItem('refresh_token', token);
+}
+
+export function getRefreshToken() {
+    return localStorage.getItem('refresh_token');
+}
+
+export function removeRefreshToken() {
+    localStorage.removeItem('refresh_token');
 }

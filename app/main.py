@@ -102,6 +102,7 @@ async def login(body: AuthRequest):
         })
         return {
             "access_token": res.session.access_token,
+            "refresh_token": res.session.refresh_token,
             "user": res.user.email
         }
     except Exception:
@@ -239,6 +240,17 @@ async def upsert_balance(snapshots: list[BalanceSnapshot], user=Depends(get_curr
 async def get_balance(user=Depends(get_current_user)):
     res = supabase_admin.table("balance_snapshots").select("*").eq("user_id", user.id).order("ts").limit(10000).execute()
     return res.data
+
+@app.post("/api/auth/refresh")
+async def refresh_token(body: dict = Body(...)):
+    try:
+        res = supabase.auth.refresh_session(body.get("refresh_token"))
+        return {
+            "access_token": res.session.access_token,
+            "refresh_token": res.session.refresh_token
+        }
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Session expired")
 
 if STATIC.is_dir():
     app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")

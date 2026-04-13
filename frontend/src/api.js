@@ -1,4 +1,4 @@
-import { getToken } from "./auth.js";
+import { getToken, setToken, getRefreshToken, setRefreshToken, logout } from "./auth.js";
 
 const API = "";
 
@@ -9,20 +9,34 @@ function authHeaders() {
     };
 }
 
-// --- Trade Meta ---
+async function fetchWithRefresh(url, options = {}) {
+    const res = await fetch(url, { ...options, headers: { ...authHeaders(), ...options.headers } });
+    if (res.status === 401) {
+        const refreshToken = getRefreshToken();
+        if (!refreshToken) { logout(); return res; }
+        const refreshRes = await fetch('/api/auth/refresh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_token: refreshToken })
+        });
+        if (!refreshRes.ok) { logout(); return res; }
+        const data = await refreshRes.json();
+        setToken(data.access_token);
+        setRefreshToken(data.refresh_token);
+        return fetch(url, { ...options, headers: { ...authHeaders(), ...options.headers } });
+    }
+    return res;
+}
 
 export async function apiGetAllMeta() {
-    const res = await fetch(`${API}/api/meta`, {
-        headers: authHeaders()
-    });
+    const res = await fetchWithRefresh(`${API}/api/meta`);
     if (!res.ok) throw new Error("Failed to fetch meta");
     return res.json();
 }
 
 export async function apiUpsertMeta(record) {
-    const res = await fetch(`${API}/api/meta`, {
+    const res = await fetchWithRefresh(`${API}/api/meta`, {
         method: "POST",
-        headers: authHeaders(),
         body: JSON.stringify({
             trade_id: record.id,
             notes: record.notes ?? null,
@@ -35,24 +49,19 @@ export async function apiUpsertMeta(record) {
 }
 
 export async function apiDeleteMeta(tradeId) {
-    const res = await fetch(`${API}/api/meta/${encodeURIComponent(tradeId)}`, {
-        method: "DELETE",
-        headers: authHeaders()
+    const res = await fetchWithRefresh(`${API}/api/meta/${encodeURIComponent(tradeId)}`, {
+        method: "DELETE"
     });
     if (!res.ok) throw new Error("Failed to delete meta");
     return res.json();
 }
 
-// --- Screenshots ---
-
 export async function apiUploadScreenshot(file) {
     const formData = new FormData();
     formData.append("file", file);
-    const res = await fetch(`${API}/api/screenshots/upload`, {
+    const res = await fetchWithRefresh(`${API}/api/screenshots/upload`, {
         method: "POST",
-        headers: {
-            "Authorization": `Bearer ${getToken()}`
-        },
+        headers: { "Authorization": `Bearer ${getToken()}` },
         body: formData
     });
     if (!res.ok) throw new Error("Failed to upload screenshot");
@@ -60,12 +69,9 @@ export async function apiUploadScreenshot(file) {
     return data.url;
 }
 
-// --- Trades ---
-
 export async function apiUpsertTrades(trades) {
-    const res = await fetch(`${API}/api/trades`, {
+    const res = await fetchWithRefresh(`${API}/api/trades`, {
         method: "POST",
-        headers: authHeaders(),
         body: JSON.stringify(trades.map(t => ({
             id: t.id,
             symbol: t.symbol,
@@ -85,28 +91,22 @@ export async function apiUpsertTrades(trades) {
 }
 
 export async function apiGetTrades() {
-    const res = await fetch(`${API}/api/trades`, {
-        headers: authHeaders()
-    });
+    const res = await fetchWithRefresh(`${API}/api/trades`);
     if (!res.ok) throw new Error("Failed to fetch trades");
     return res.json();
 }
 
 export async function apiDeleteTrade(tradeId) {
-    const res = await fetch(`${API}/api/trades/${encodeURIComponent(tradeId)}`, {
-        method: "DELETE",
-        headers: authHeaders()
+    const res = await fetchWithRefresh(`${API}/api/trades/${encodeURIComponent(tradeId)}`, {
+        method: "DELETE"
     });
     if (!res.ok) throw new Error("Failed to delete trade");
     return res.json();
-  }
-
-// --- Account ---
+}
 
 export async function apiChangePassword(password) {
-    const res = await fetch(`${API}/api/auth/change-password`, {
+    const res = await fetchWithRefresh(`${API}/api/auth/change-password`, {
         method: "POST",
-        headers: authHeaders(),
         body: JSON.stringify({ password })
     });
     if (!res.ok) throw new Error("Failed to change password");
@@ -114,27 +114,24 @@ export async function apiChangePassword(password) {
 }
 
 export async function apiDeleteAllTrades() {
-    const res = await fetch(`${API}/api/account/trades`, {
-        method: "DELETE",
-        headers: authHeaders()
+    const res = await fetchWithRefresh(`${API}/api/account/trades`, {
+        method: "DELETE"
     });
     if (!res.ok) throw new Error("Failed to delete all trades");
     return res.json();
 }
 
 export async function apiDeleteAccount() {
-    const res = await fetch(`${API}/api/account`, {
-        method: "DELETE",
-        headers: authHeaders()
+    const res = await fetchWithRefresh(`${API}/api/account`, {
+        method: "DELETE"
     });
     if (!res.ok) throw new Error("Failed to delete account");
     return res.json();
 }
 
 export async function apiUpsertBalance(snapshots) {
-    const res = await fetch(`${API}/api/balance`, {
+    const res = await fetchWithRefresh(`${API}/api/balance`, {
         method: "POST",
-        headers: authHeaders(),
         body: JSON.stringify(snapshots.map(s => ({
             ts: s.ts,
             date_key: s.dateKey,
@@ -146,9 +143,7 @@ export async function apiUpsertBalance(snapshots) {
 }
 
 export async function apiGetBalance() {
-    const res = await fetch(`${API}/api/balance`, {
-        headers: authHeaders()
-    });
+    const res = await fetchWithRefresh(`${API}/api/balance`);
     if (!res.ok) throw new Error("Failed to fetch balance");
     return res.json();
 }
