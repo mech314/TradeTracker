@@ -608,7 +608,7 @@ function render() {
   const onAccount = page === Page.Account;
   const onCalendar = page === Page.Calendar;
   const onTradeImport = page === Page.TradeImport;
-  /** Equity + statistics + weekday charts (dashboard / calendar only). */
+  /** Equity curve, statistics (KPIs + sparkline), weekday chart — not on Account / Import. */
   const showChartsRow = onDashboard || onCalendar;
 
   const cal = state.calendarMonth;
@@ -736,7 +736,9 @@ function render() {
       ${onAccount ? accountPageHtml() : ""}
       ${onTradeImport ? tradeImportPageHtml() : ""}
 
-      <section class="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      ${
+        showChartsRow
+          ? `<section class="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
           <h2 class="text-sm font-medium text-slate-400 ${onCalendar ? "mb-1" : "mb-3"}">Equity curve</h2>
           ${onCalendar ? `<p class="text-xs text-slate-600 mb-2">Account balance for the selected month (same scope as Statistics).</p>` : ""}
@@ -765,7 +767,9 @@ function render() {
           <h2 class="text-sm font-medium text-slate-400 mb-3">P&amp;L by weekday (close)</h2>
           <div class="h-52 sm:h-64"><canvas id="chart-weekday"></canvas></div>
         </div>
-      </section>
+      </section>`
+          : ""
+      }
 
       ${onCalendar ? calendarHtml : ""}
     </main>
