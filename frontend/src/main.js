@@ -668,6 +668,7 @@ function render() {
       ${navBtn("account", "Account")}
       ${navBtn("dashboard", "Dashboard")}
       ${navBtn("calendar", "Calendar")}
+      ${navBtn("strategy_builder", "Strategy Builder")}
     </aside>
     <div class="flex-1 min-w-0 flex flex-col min-h-screen">
     <header class="border-b border-slate-800/80 bg-surface-raised/50 backdrop-blur-sm sticky top-0 z-30 pt-[env(safe-area-inset-top,0px)]">
@@ -697,6 +698,7 @@ function render() {
 
       ${state.page === "dashboard" ? dashboardStatsHtml : ""}
       ${state.page === "account" ? accountPageHtml() : ""}
+      ${state.page === "strategy_builder" ? strategyBuilderPageHtml() : ""}
 
       <section class="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
@@ -744,8 +746,10 @@ function render() {
           <button type="button" id="mobile-nav-close" class="min-h-[44px] min-w-[44px] shrink-0 rounded-lg text-lg leading-none text-slate-400 hover:bg-slate-800 hover:text-white transition-colors" aria-label="Close menu">&times;</button>
         </div>
         <nav class="flex flex-col gap-1 p-3" aria-label="Primary navigation">
+          ${navBtn("account", "Account")}
           ${navBtn("dashboard", "Dashboard")}
           ${navBtn("calendar", "Calendar")}
+          ${navBtn("strategy_builder", "Strategy Builder")}
         </nav>
       </div>
     </div>
@@ -1650,7 +1654,7 @@ document.querySelector("#app")?.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-nav-page]");
   if (!btn) return;
   const page = btn.dataset.navPage;
-  const validPages = ["dashboard", "calendar", "account"];
+  const validPages = ["dashboard", "calendar", "account", "strategy_builder"];
   if (!validPages.includes(page)) return;
   closeMobileNav();
   state.page = page;
