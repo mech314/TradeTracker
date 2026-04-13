@@ -121,6 +121,20 @@ function showAuthScreen() {
 
 const $ = (sel, el = document) => el.querySelector(sel);
 
+/** Route ids for `state.page` — use these instead of string literals. */
+const Page = Object.freeze({
+  Account: "account",
+  Dashboard: "dashboard",
+  Calendar: "calendar",
+  TradeImport: "trade-import",
+});
+
+const ALL_PAGE_IDS = Object.freeze(Object.values(Page));
+
+function isActivePage(id) {
+  return state.page === id;
+}
+
 let state = {
   trades: [],
   metrics: null,
@@ -133,7 +147,7 @@ let state = {
   detailTrade: null,
   tradeMetaById: new Map(),
   screenshotUrls: new Map(),
-  page: "dashboard",
+  page: Page.Dashboard,
 };
 
 let metaPopoverHideTimer = null;
@@ -568,12 +582,34 @@ function accountPageHtml() {
   `;
 }
 
+function tradeImportPageHtml() {
+  return `
+    <section class="rounded-xl border border-slate-800 bg-surface-raised p-5 max-w-xl space-y-4">
+      <h2 class="text-sm font-medium text-slate-400">Import trades</h2>
+      <p class="text-sm text-slate-500">
+        Pick one or more Schwab cash journal CSVs — same parser as <span class="text-slate-400">Load CSV</span> in the header.
+      </p>
+      <button type="button" id="import-csv-trigger"
+        class="inline-flex items-center justify-center min-h-[44px] px-4 py-2 rounded-lg bg-accent/15 text-accent text-sm font-medium hover:bg-accent/25 transition-colors border border-accent/30">
+        Choose CSV file(s)
+      </button>
+    </section>
+  `;
+}
+
 function render() {
   closeMobileNav();
   const root = $("#app");
   const m = state.metrics;
   const trades = state.trades;
   const dayFilter = state.selectedDay;
+  const { page } = state;
+  const onDashboard = page === Page.Dashboard;
+  const onAccount = page === Page.Account;
+  const onCalendar = page === Page.Calendar;
+  const onTradeImport = page === Page.TradeImport;
+  /** Equity + statistics + weekday charts (dashboard / calendar only). */
+  const showChartsRow = onDashboard || onCalendar;
 
   const cal = state.calendarMonth;
   let calendarTableTrades = tradesClosedInMonth(
@@ -653,7 +689,7 @@ function render() {
           </div>
         </section>
     </section>`;
-        
+
   const navBtn = (page, label) => {
     const active = state.page === page;
     return `<button type="button" data-nav-page="${page}" class="w-full text-left px-3 py-2.5 text-sm rounded-lg transition-colors ${
@@ -665,9 +701,10 @@ function render() {
   root.innerHTML = `
     <div class="min-h-screen flex">
     <aside class="hidden lg:flex w-56 lg:w-64 shrink-0 min-h-screen self-stretch flex-col bg-slate-900 border-r border-slate-700 p-3 lg:p-4 text-sm text-slate-300">
-      ${navBtn("account", "Account")}
-      ${navBtn("dashboard", "Dashboard")}
-      ${navBtn("calendar", "Calendar")}
+      ${navBtn(Page.Account, "Account")}
+      ${navBtn(Page.Dashboard, "Dashboard")}
+      ${navBtn(Page.Calendar, "Calendar")}
+      ${navBtn(Page.TradeImport, "Import trades")}
     </aside>
     <div class="flex-1 min-w-0 flex flex-col min-h-screen">
     <header class="border-b border-slate-800/80 bg-surface-raised/50 backdrop-blur-sm sticky top-0 z-30 pt-[env(safe-area-inset-top,0px)]">
@@ -695,13 +732,14 @@ function render() {
     <main class="max-w-7xl mx-auto px-3 sm:px-4 py-6 sm:py-8 space-y-8 sm:space-y-10 w-full min-w-0">
       <p class="text-sm text-slate-500" id="file-status">${state.filesLabel}</p>
 
-      ${state.page === "dashboard" ? dashboardStatsHtml : ""}
-      ${state.page === "account" ? accountPageHtml() : ""}
+      ${onDashboard ? dashboardStatsHtml : ""}
+      ${onAccount ? accountPageHtml() : ""}
+      ${onTradeImport ? tradeImportPageHtml() : ""}
 
       <section class="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div class="rounded-xl border border-slate-800 bg-surface-raised p-4 min-w-0">
-          <h2 class="text-sm font-medium text-slate-400 ${state.page === "calendar" ? "mb-1" : "mb-3"}">Equity curve</h2>
-          ${state.page === "calendar" ? `<p class="text-xs text-slate-600 mb-2">Account balance for the selected month (same scope as Statistics).</p>` : ""}
+          <h2 class="text-sm font-medium text-slate-400 ${onCalendar ? "mb-1" : "mb-3"}">Equity curve</h2>
+          ${onCalendar ? `<p class="text-xs text-slate-600 mb-2">Account balance for the selected month (same scope as Statistics).</p>` : ""}
           <div class="h-52 sm:h-64"><canvas id="chart-equity"></canvas></div>
         </div>
         <section class="rounded-xl border border-slate-800 bg-surface-raised p-4 sm:p-5 min-w-0" id="equity-kpi-section">
@@ -729,9 +767,7 @@ function render() {
         </div>
       </section>
 
-      ${state.page === "calendar" ? calendarHtml : ""}
-
-
+      ${onCalendar ? calendarHtml : ""}
     </main>
     </div>
     </div>
@@ -744,8 +780,10 @@ function render() {
           <button type="button" id="mobile-nav-close" class="min-h-[44px] min-w-[44px] shrink-0 rounded-lg text-lg leading-none text-slate-400 hover:bg-slate-800 hover:text-white transition-colors" aria-label="Close menu">&times;</button>
         </div>
         <nav class="flex flex-col gap-1 p-3" aria-label="Primary navigation">
-          ${navBtn("dashboard", "Dashboard")}
-          ${navBtn("calendar", "Calendar")}
+          ${navBtn(Page.Account, "Account")}
+          ${navBtn(Page.Dashboard, "Dashboard")}
+          ${navBtn(Page.Calendar, "Calendar")}
+          ${navBtn(Page.TradeImport, "Import trades")}
         </nav>
       </div>
     </div>
@@ -1085,6 +1123,10 @@ async function promptDeleteTrade() {
 }
 
 function bind() {
+  $("#import-csv-trigger")?.addEventListener("click", () => {
+    $("#file-input")?.click();
+  });
+
   $("#file-input")?.addEventListener("change", async (e) => {
     const input = e.target;
     const files = input.files;
@@ -1114,6 +1156,9 @@ function bind() {
       state.calendarMonth = new Date(trades[0].closeTs);
     }
     state.selectedDay = null;
+    if (isActivePage(Page.TradeImport)) {
+      state.page = Page.Dashboard;
+    }
     render();
     input.value = "";
   });
@@ -1214,7 +1259,7 @@ function bind() {
     $("#modal-clear-shot")?.classList.remove("hidden");
   });
 
-  if (state.page === "account") {
+  if (isActivePage(Page.Account)) {
     const emailEl = $("#account-email");
     if (emailEl) emailEl.textContent = localStorage.getItem("user_email") ?? "";
   
@@ -1281,11 +1326,13 @@ function paintCharts() {
   const kpiPeriod = $("#kpi-equity-period");
   if (!eq || !wd) return;
 
+  const onCalendar = isActivePage(Page.Calendar);
+
   let equitySlice = state.equity;
   let weekdayBars = state.metrics?.byWeekday;
   let tradesForKpis = state.trades;
 
-  if (state.page === "calendar") {
+  if (onCalendar) {
     const d = state.calendarMonth;
     const y = d.getFullYear();
     const mo = d.getMonth();
@@ -1302,13 +1349,12 @@ function paintCharts() {
     kpiPeriod.textContent = "All loaded data";
   }
 
-  const cumSeries =
-    state.page === "calendar"
-      ? cumulativePnlDailySeries(state.trades, {
-          y: state.calendarMonth.getFullYear(),
-          mo: state.calendarMonth.getMonth(),
-        })
-      : cumulativePnlDailySeries(state.trades, null);
+  const cumSeries = onCalendar
+    ? cumulativePnlDailySeries(state.trades, {
+        y: state.calendarMonth.getFullYear(),
+        mo: state.calendarMonth.getMonth(),
+      })
+    : cumulativePnlDailySeries(state.trades, null);
   const cumEnd =
     cumSeries.length > 0
       ? cumSeries[cumSeries.length - 1].cumulative
@@ -1650,8 +1696,7 @@ document.querySelector("#app")?.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-nav-page]");
   if (!btn) return;
   const page = btn.dataset.navPage;
-  const validPages = ["dashboard", "calendar", "account"];
-  if (!validPages.includes(page)) return;
+  if (!ALL_PAGE_IDS.includes(page)) return;
   closeMobileNav();
   state.page = page;
   render();
