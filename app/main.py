@@ -238,8 +238,24 @@ async def upsert_balance(snapshots: list[BalanceSnapshot], user=Depends(get_curr
 
 @app.get("/api/balance")
 async def get_balance(user=Depends(get_current_user)):
-    res = supabase_admin.table("balance_snapshots").select("*").eq("user_id", user.id).order("ts").limit(10000).execute()
-    return res.data
+    all_rows = []
+    page = 0
+    page_size = 1000
+    while True:
+        res = (
+            supabase_admin.table("balance_snapshots")
+            .select("*")
+            .eq("user_id", user.id)
+            .order("ts")
+            .range(page * page_size, (page + 1) * page_size - 1)
+            .execute()
+        )
+        batch = res.data or []
+        all_rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        page += 1
+    return all_rows
 
 @app.post("/api/auth/refresh")
 async def refresh_token(body: dict = Body(...)):
