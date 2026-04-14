@@ -9,8 +9,15 @@ function authHeaders() {
     };
 }
 
+function requestHeaders(options) {
+    const merged = { ...authHeaders(), ...options.headers };
+    // FormData must use multipart boundary; browser sets Content-Type when omitted.
+    if (options.body instanceof FormData) delete merged["Content-Type"];
+    return merged;
+}
+
 async function fetchWithRefresh(url, options = {}) {
-    const res = await fetch(url, { ...options, headers: { ...authHeaders(), ...options.headers } });
+    const res = await fetch(url, { ...options, headers: requestHeaders(options) });
     if (res.status === 401) {
         const refreshToken = getRefreshToken();
         if (!refreshToken) { logout(); return res; }
@@ -23,7 +30,7 @@ async function fetchWithRefresh(url, options = {}) {
         const data = await refreshRes.json();
         setToken(data.access_token);
         setRefreshToken(data.refresh_token);
-        return fetch(url, { ...options, headers: { ...authHeaders(), ...options.headers } });
+        return fetch(url, { ...options, headers: requestHeaders(options) });
     }
     return res;
 }
