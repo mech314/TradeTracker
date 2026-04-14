@@ -103,7 +103,8 @@ async def login(body: AuthRequest):
         return {
             "access_token": res.session.access_token,
             "refresh_token": res.session.refresh_token,
-            "user": res.user.email
+            "user": res.user.email,
+            "user_id": res.user.id
         }
     except Exception:
         raise HTTPException(status_code=400, detail="Failed to login")

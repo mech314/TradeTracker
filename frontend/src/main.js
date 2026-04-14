@@ -1134,19 +1134,28 @@ function bind() {
     if (!files?.length) return;
     const parts = await parseFiles(files);
     const { fills, balancePoints } = mergeExtracts(parts);
-    const trades = buildRoundTripTrades(fills);
-    state.trades = trades;
+    const userId = localStorage.getItem("user_id"); 
+    const trades = buildRoundTripTrades(fills, userId);
     try {
       await apiUpsertTrades(trades);
     } catch (err) {
-        console.error("Failed to save trades:", err);
+      console.error("Failed to save trades:", err);
+      state.filesLabel = `Could not save trades: ${err.message}`;
+      alert(
+        `Trades were not saved to your account (the dashboard would look fine until you refresh).\n\n${err.message}\n\nTry again, or check that you are logged in and the network is OK.`,
+      );
+      input.value = "";
+      return;
     }
     try {
       await apiUpsertBalance(balancePoints);
     } catch (err) {
       console.error("Failed to save balance:", err);
+      alert(
+        `Trades were saved, but account balance snapshots failed to save.\n\n${err.message}\n\nThe equity curve may be empty after you log in again until you re-upload or we fix the error.`,
+      );
     }
-    state.fileLoadInfo = { fileCount: parts.length, fillCount: fills.length };
+    state.trades = trades;
     state.fileLoadInfo = { fileCount: parts.length, fillCount: fills.length };
     await hydrateTradeMeta();
     state.metrics = computeMetrics(trades);
@@ -1724,7 +1733,7 @@ if (!isPasswordRecovery) {
   if (!isLoggedIn()) {
     showAuthScreen();
   } else {
-    apiGetTrades().then(async rows => {
+    apiGetTrades().then(async (rows) => {
       if (rows.length) {
         state.trades = rows.map(r => ({
           id: r.id,

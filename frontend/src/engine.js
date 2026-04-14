@@ -81,7 +81,7 @@ export function extractFillsAndBalances(csvText) {
  * Per symbol: 0 → open → 0 round trip. Keep only if first and last fill same calendar day.
  * Discards open positions at end. Ignores cross-day round trips.
  */
-export function buildRoundTripTrades(fills) {
+export function buildRoundTripTrades(fills, userId) {
   const bySym = new Map();
   for (const f of fills) {
     if (!bySym.has(f.symbol)) bySym.set(f.symbol, []);
@@ -116,7 +116,7 @@ export function buildRoundTripTrades(fills) {
           const shareTurnover = sumAbsQtyDelta / 2;
           const openSide = first.qtyDelta > 0 ? "LONG" : "SHORT";
           trades.push({
-            id: tradeId(symbol, first.ts, last.ts, bucket.length),
+            id: tradeId(symbol, first.ts, last.ts, bucket.length, userId),
             symbol,
             openSide,
             dateKey: last.dateKey,
@@ -127,6 +127,7 @@ export function buildRoundTripTrades(fills) {
             twoWayNotional,
             maxShares: maxAbsQty,
             shareTurnover,
+            userId,
             returnPerDollar:
               twoWayNotional > 0 ? pnl / twoWayNotional : null,
             win: pnl > 0,
@@ -146,8 +147,8 @@ export function buildRoundTripTrades(fills) {
   return trades;
 }
 
-export function tradeId(symbol, openTs, closeTs, nLegs) {
-  return `${symbol}|${openTs}|${closeTs}|${nLegs}`;
+export function tradeId(symbol, openTs, closeTs, nLegs, userId) {
+  return `${symbol}|${openTs}|${closeTs}|${nLegs}|${userId}`;
 }
 
 export function buildEquitySeries(balancePoints) {

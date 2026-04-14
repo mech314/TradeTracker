@@ -93,7 +93,8 @@ export async function apiUpsertTrades(trades) {
 export async function apiGetTrades() {
     const res = await fetchWithRefresh(`${API}/api/trades`);
     if (!res.ok) throw new Error("Failed to fetch trades");
-    return res.json();
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
 }
 
 export async function apiDeleteTrade(tradeId) {
@@ -145,5 +146,6 @@ export async function apiUpsertBalance(snapshots) {
 export async function apiGetBalance() {
     const res = await fetchWithRefresh(`${API}/api/balance`);
     if (!res.ok) throw new Error("Failed to fetch balance");
-    return res.json();
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
 }

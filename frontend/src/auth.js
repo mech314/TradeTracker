@@ -27,6 +27,7 @@ export async function login(email, password) {
     setToken(data.access_token);
     setRefreshToken(data.refresh_token);
     localStorage.setItem("user_email", data.user);
+    localStorage.setItem("user_id", data.user_id);
     return data.user;
     }
 
