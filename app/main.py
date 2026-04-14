@@ -70,6 +70,11 @@ class BalanceSnapshot(BaseModel):
     date_key: str
     balance: float
 
+class ImportCreate(BaseModel):
+    broker: str
+    tags: list[str] = []
+    filename: Optional[str] = None
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
     try:
@@ -268,6 +273,16 @@ async def refresh_token(body: dict = Body(...)):
         }
     except Exception as e:
         raise HTTPException(status_code=401, detail="Session expired")
+
+@app.post("/api/imports")
+async def create_import(body: ImportCreate, user=Depends(get_current_user)):
+    res = supabase_admin.table("imports").insert({
+        "user_id": user.id,
+        "broker": body.broker,
+        "tags": body.tags,
+        "filename": body.filename
+    }).execute()
+    return res.data
 
 if STATIC.is_dir():
     app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
