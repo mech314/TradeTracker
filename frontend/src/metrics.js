@@ -1,5 +1,22 @@
 const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+/**
+ * Normalize trade/API `date_key` to `YYYY-MM-DD` so maps line up with calendar
+ * cells (`toDateKey`) even when the DB has `2025-4-5` instead of `2025-04-05`.
+ */
+export function canonicalDateKey(k) {
+  if (k == null || k === "") return "";
+  const s = String(k).trim();
+  const padded = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (padded) return `${padded[1]}-${padded[2]}-${padded[3]}`;
+  const loose = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (loose) {
+    const [, y, mo, d] = loose;
+    return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  }
+  return "";
+}
+
 export function computeMetrics(trades) {
   const n = trades.length;
   const wins = trades.filter((t) => t.win);
@@ -25,7 +42,9 @@ export function computeMetrics(trades) {
 
   const byDayPnl = new Map();
   for (const t of trades) {
-    byDayPnl.set(t.dateKey, (byDayPnl.get(t.dateKey) || 0) + t.pnl);
+    const dk = canonicalDateKey(t.dateKey);
+    if (!dk) continue;
+    byDayPnl.set(dk, (byDayPnl.get(dk) || 0) + t.pnl);
   }
 
   const byWeekday = WD.map((label, day) => ({

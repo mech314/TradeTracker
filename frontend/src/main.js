@@ -6,11 +6,12 @@ import {
   buildEquitySeries,
 } from "./engine.js";
 import { coerceNumber } from "./csv.js";
-import { 
-  computeMetrics, 
-  formatPct, 
-  formatUsd } 
-  from "./metrics.js";
+import {
+  computeMetrics,
+  formatPct,
+  formatUsd,
+  canonicalDateKey,
+} from "./metrics.js";
 import {
   renderEquityChart,
   renderCumulativeReturnSparkline,
@@ -40,6 +41,8 @@ import {
   apiDeleteAccount,
   apiUpsertBalance,
   apiGetBalance,
+  apiCreateImport,
+  apiGetImports,
 } from "./api.js";
 
 function showAuthScreen() {
@@ -138,7 +141,12 @@ function isActivePage(id) {
 let state = {
   trades: [],
   metrics: null,
-  equity: [],
+  /** Balance rows from DB or last CSV import; used for equity + tag filter. */
+  balanceSnapshots: [],
+  /** User import records (includes `tags`); from GET /api/imports. */
+  imports: [],
+  /** When set, dashboard + calendar charts/tables use only trades whose import lists this tag. */
+  dashboardTagFilter: "",
   filesLabel: "No files loaded",
   /** Set when CSVs are loaded: used to refresh the status line after deleting trades. */
   fileLoadInfo: null,
@@ -148,6 +156,8 @@ let state = {
   tradeMetaById: new Map(),
   screenshotUrls: new Map(),
   page: Page.Dashboard,
+  /** Calendar year for dashboard P&amp;L heatmap (Mon–Fri). */
+  pnlHeatmapYear: new Date().getFullYear(),
 };
 
 let metaPopoverHideTimer = null;
@@ -155,6 +165,101 @@ let metaPopoverAnchor = null;
 let metaPopoverDocumentCloseBound = false;
 let modalScreenshotExplicitlyCleared = false;
 let tradeMenuTradeId = null;
+
+/** Normalize `imports.tags` from API (array, JSON string, comma-separated string, or array-like object). */
+function importTagsAsArray(raw) {
+  if (raw == null) return [];
+  if (Array.isArray(raw)) {
+    return raw.map((x) => String(x).trim()).filter(Boolean);
+  }
+  if (typeof raw === "object" && raw !== null) {
+    const keys = Object.keys(raw).filter((k) => /^\d+$/.test(k));
+    if (keys.length) {
+      return keys
+        .sort((a, b) => Number(a) - Number(b))
+        .map((k) => String(raw[k]).trim())
+        .filter(Boolean);
+    }
+  }
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    if (!s) return [];
+    if (s.startsWith("[")) {
+      try {
+        const j = JSON.parse(s);
+        if (Array.isArray(j)) {
+          return j.map((x) => String(x).trim()).filter(Boolean);
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+    return s.split(",").map((t) => t.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function uniqueSortedTagsFromImports(imports) {
+  const set = new Set();
+  for (const im of imports || []) {
+    for (const t of importTagsAsArray(im.tags)) {
+      if (t) set.add(t);
+    }
+  }
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+/** Canonical form for comparing import UUIDs from DB vs API (case / whitespace). */
+function normImportId(v) {
+  if (v == null || v === "") return "";
+  return String(v).trim().toLowerCase();
+}
+
+/** `null` = no tag selected; otherwise Set of normalized import ids whose tags include `tag`. */
+function importIdsWithTag(imports, tag) {
+  const want = (tag || "").trim();
+  if (!want) return null;
+  const ids = new Set();
+  for (const im of imports || []) {
+    const row = importTagsAsArray(im.tags);
+    if (row.some((x) => String(x).trim() === want)) {
+      const nid = normImportId(im.id);
+      if (nid) ids.add(nid);
+    }
+  }
+  return ids;
+}
+
+function filteredTradesByTag(trades, imports, tag) {
+  const want = (tag || "").trim();
+  if (!want) return trades;
+  const anyTradeLinked = trades.some((t) => normImportId(t.importId) !== "");
+  if (!anyTradeLinked) {
+    return trades;
+  }
+  const ids = importIdsWithTag(imports, want);
+  if (!ids || ids.size === 0) return [];
+  return trades.filter((t) => {
+    const pid = normImportId(t.importId);
+    return pid !== "" && ids.has(pid);
+  });
+}
+
+function filteredBalanceSnapshotsByTag(snapshots, imports, tag) {
+  const want = (tag || "").trim();
+  if (!want) return snapshots || [];
+  const snaps = snapshots || [];
+  const anySnapLinked = snaps.some((s) => normImportId(s.importId) !== "");
+  if (!anySnapLinked) {
+    return snaps;
+  }
+  const ids = importIdsWithTag(imports, want);
+  if (!ids || ids.size === 0) return [];
+  return snaps.filter((s) => {
+    const pid = normImportId(s.importId);
+    return pid !== "" && ids.has(pid);
+  });
+}
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -224,7 +329,9 @@ function equitySeriesForMonth(series, y, mo) {
 
 function tradesClosedInMonth(trades, y, mo) {
   return trades.filter((t) => {
-    const parts = t.dateKey.split("-").map(Number);
+    const dk = canonicalDateKey(t.dateKey);
+    if (!dk) return false;
+    const parts = dk.split("-").map(Number);
     const yy = parts[0];
     const mm = parts[1];
     return yy === y && mm - 1 === mo;
@@ -244,7 +351,8 @@ function cumulativePnlDailySeries(trades, monthFilter) {
 
   const pnlByDay = new Map();
   for (const t of list) {
-    const k = t.dateKey;
+    const k = canonicalDateKey(t.dateKey);
+    if (!k) continue;
     const p = Number.isFinite(t.pnl) ? t.pnl : 0;
     pnlByDay.set(k, (pnlByDay.get(k) || 0) + p);
   }
@@ -260,6 +368,12 @@ function toDateKey(d) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
+function dateKeyYear(dk) {
+  if (dk == null || typeof dk !== "string") return null;
+  const y = Number(dk.slice(0, 4));
+  return Number.isFinite(y) ? y : null;
+}
+
 function addDays(d, n) {
   const x = new Date(d.getTime());
   x.setDate(x.getDate() + n);
@@ -272,6 +386,232 @@ function mondayOnOrBefore(d) {
   const dow = x.getDay();
   x.setDate(x.getDate() - ((dow + 6) % 7));
   return x;
+}
+
+/** Each Monday whose Mon–Fri range intersects the calendar year `y`. */
+function weekMondaysOverlappingYear(y) {
+  const jan1 = new Date(y, 0, 1);
+  const dec31 = new Date(y, 11, 31);
+  let mon = mondayOnOrBefore(jan1);
+  const list = [];
+  for (let guard = 0; guard < 55; guard++) {
+    const fri = addDays(mon, 4);
+    if (fri >= jan1 && mon <= dec31) list.push(new Date(mon));
+    mon = addDays(mon, 7);
+    if (mon > addDays(dec31, 6)) break;
+  }
+  return list;
+}
+
+function pnlHeatmapYearOptions(trades) {
+  const cy = new Date().getFullYear();
+  let minY = cy;
+  for (const t of trades) {
+    const yy = dateKeyYear(t.dateKey);
+    if (yy != null) minY = Math.min(minY, yy);
+  }
+  const years = [];
+  for (let yy = cy; yy >= minY; yy--) years.push(yy);
+  return years.length ? years : [cy];
+}
+
+/** Per-trade stats for round trips whose `dateKey` (close day) falls in `year`. */
+function pnlTradeStatsForYear(trades, year) {
+  const inYear = trades.filter((t) => dateKeyYear(t.dateKey) === year);
+  const winPnls = inYear
+    .filter((t) => Number.isFinite(t.pnl) && t.pnl > 0)
+    .map((t) => t.pnl);
+  const lossPnls = inYear
+    .filter((t) => Number.isFinite(t.pnl) && t.pnl < 0)
+    .map((t) => t.pnl);
+  return {
+    biggestWinner: winPnls.length ? Math.max(...winPnls) : null,
+    biggestLoser: lossPnls.length ? Math.min(...lossPnls) : null,
+    avgWinner: winPnls.length
+      ? winPnls.reduce((a, b) => a + b, 0) / winPnls.length
+      : null,
+    avgLoser: lossPnls.length
+      ? lossPnls.reduce((a, b) => a + b, 0) / lossPnls.length
+      : null,
+  };
+}
+
+/** Max / min daily net P&amp;L among `byDayPnl` keys in `year` (days with at least one counted close). */
+function pnlDayBestWorstForYear(map, year) {
+  let bestDay = null;
+  let worstDay = null;
+  for (const [dk, v] of map) {
+    if (dateKeyYear(dk) !== year || !Number.isFinite(v)) continue;
+    if (bestDay === null || v > bestDay) bestDay = v;
+    if (worstDay === null || v < worstDay) worstDay = v;
+  }
+  return { bestDay, worstDay };
+}
+
+/**
+ * GitHub-style grid for one calendar year: Mon–Fri only (5 rows), columns = weeks overlapping that year.
+ * `byDayPnl`: dateKey → net P&amp;L for that day (same keys as `computeMetrics`).
+ */
+function renderPnlHeatmapSectionHtml(byDayPnl, trades, year, yearOptions) {
+  const map = byDayPnl instanceof Map ? byDayPnl : new Map();
+  const y = year;
+  const opts = Array.isArray(yearOptions) && yearOptions.length ? yearOptions : [y];
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const cy = today.getFullYear();
+  const weekMons = weekMondaysOverlappingYear(y);
+
+  let maxAbs = 0;
+  for (const mon of weekMons) {
+    for (let r = 0; r < 5; r++) {
+      const d = addDays(mon, r);
+      if (d.getFullYear() !== y) continue;
+      if (y === cy && d > today) continue;
+      const v = map.get(toDateKey(d));
+      if (v != null && Number.isFinite(v) && v !== 0) {
+        const a = Math.abs(v);
+        if (a > maxAbs) maxAbs = a;
+      }
+    }
+  }
+  if (maxAbs === 0) maxAbs = 1;
+
+  const stats = pnlTradeStatsForYear(Array.isArray(trades) ? trades : [], y);
+  const dayBw = pnlDayBestWorstForYear(map, y);
+  const fmtStat = (x) =>
+    x != null && Number.isFinite(x) ? formatUsd(x) : "—";
+
+  const gainCls = [
+    "bg-emerald-900/55",
+    "bg-emerald-800/80",
+    "bg-emerald-600/90",
+    "bg-emerald-500",
+    "bg-gain",
+  ];
+  const lossCls = [
+    "bg-rose-900/55",
+    "bg-rose-800/80",
+    "bg-rose-600/90",
+    "bg-rose-500",
+    "bg-loss",
+  ];
+
+  const cellTier = (v) => {
+    const t = Math.min(1, Math.abs(v) / maxAbs);
+    return Math.min(4, Math.floor(t * 4.0001));
+  };
+
+  const weekdayOneLetter = ["M", "T", "W", "T", "F"];
+  const labelCells = weekdayOneLetter
+    .map(
+      (ch) =>
+        `<span class="h-4 sm:h-5 flex items-center justify-end text-[10px] text-slate-600 tabular-nums leading-none pr-1">${ch}</span>`,
+    )
+    .join("");
+
+  const cellBox =
+    "block w-4 h-4 sm:w-5 sm:h-5 rounded-sm shrink-0 border border-slate-800/90 ";
+
+  const columns = [];
+  for (const mon of weekMons) {
+    const cells = [];
+    for (let r = 0; r < 5; r++) {
+      const d = addDays(mon, r);
+      const dk = toDateKey(d);
+      const inYear = d.getFullYear() === y;
+      const isFuture = inYear && y === cy && d > today;
+      const raw = map.get(dk);
+      const has = inYear && !isFuture && raw != null && Number.isFinite(raw);
+      const v = has ? raw : 0;
+      let box = cellBox;
+      if (!inYear) {
+        box += "bg-slate-950/40 border-slate-800/40";
+      } else if (isFuture) {
+        box += "bg-slate-900/25 border-slate-800/40";
+      } else if (!has) {
+        box += "bg-slate-800/45";
+      } else if (v === 0) {
+        box += "bg-slate-700/70 border-slate-700";
+      } else if (v > 0) {
+        box += gainCls[cellTier(v)];
+      } else {
+        box += lossCls[cellTier(v)];
+      }
+      const tip = !inYear
+        ? `${dk} (outside ${y})`
+        : isFuture
+          ? `${dk} (upcoming)`
+          : has
+            ? `${dk}: ${formatUsd(v)} net`
+            : `${dk}: no trades`;
+      cells.push(
+        `<span class="${box}" role="img" aria-label="${escapeAttr(tip)}" title="${escapeAttr(tip)}"></span>`,
+      );
+    }
+    columns.push(`<div class="flex flex-col gap-1 shrink-0">${cells.join("")}</div>`);
+  }
+
+  const legendSwatches = (classes, sign) =>
+    classes
+      .map(
+        (c) =>
+          `<span class="inline-block w-4 h-4 sm:w-5 sm:h-5 rounded-sm border border-slate-800/80 ${c}" title="${sign}"></span>`,
+      )
+      .join("");
+
+  const yearOpts = opts
+    .map(
+      (yy) =>
+        `<option value="${yy}"${yy === y ? " selected" : ""}>${yy}</option>`,
+    )
+    .join("");
+
+  const statCardSidebar = (label, valueHtml) => `
+    <div class="rounded-lg border border-slate-800/80 bg-surface-overlay/50 px-3 py-2.5 min-w-0">
+      <p class="text-[11px] font-medium text-slate-500 uppercase tracking-wide">${label}</p>
+      <p class="text-base sm:text-lg font-mono font-semibold tracking-tight mt-1 tabular-nums">${valueHtml}</p>
+    </div>`;
+
+  return `
+    <section class="rounded-xl border border-slate-800 bg-surface-raised p-4 sm:p-5" aria-labelledby="pnl-heatmap-heading">
+      <h2 id="pnl-heatmap-heading" class="text-sm font-medium text-slate-400 mb-2">P&amp;L heatmap</h2>
+      <p class="text-[10px] text-slate-600 mb-4 lg:mb-5">Days: net P&amp;L on the calendar day. Trades: round trips closed in ${y}. Grid: daily net (Mon–Fri).</p>
+
+      <div class="flex flex-col lg:flex-row lg:items-stretch lg:gap-6">
+        <div class="min-w-0 w-full lg:flex-[2] lg:basis-0">
+          <p class="text-xs text-slate-600 mb-2">Older weeks on the left · darker = larger |daily P&amp;L| within ${y}</p>
+          <div class="flex gap-1.5 sm:gap-2 min-w-0">
+            <div class="flex flex-col gap-1 shrink-0 pt-px" aria-hidden="true">${labelCells}</div>
+            <div class="overflow-x-auto min-w-0 flex-1 overscroll-x-contain touch-pan-x pb-1 -mr-1 pr-1">
+              <div class="flex gap-1 w-max">${columns.join("")}</div>
+            </div>
+          </div>
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-3 text-[11px] text-slate-500">
+            <span class="inline-flex items-center gap-1.5"><span class="text-slate-600">Loss</span> ${legendSwatches([...lossCls].reverse(), "loss")}</span>
+            <span class="inline-flex items-center gap-1.5"><span class="w-4 h-4 sm:w-5 sm:h-5 rounded-sm border border-slate-800/80 bg-slate-800/45 shrink-0" title="No trades"></span> No trades</span>
+            <span class="inline-flex items-center gap-1.5"><span class="text-slate-600">Gain</span> ${legendSwatches(gainCls, "gain")}</span>
+          </div>
+        </div>
+
+        <div class="min-w-0 w-full lg:flex-1 lg:basis-0 mt-6 pt-6 border-t border-slate-800 lg:mt-0 lg:pt-0 lg:border-t-0 lg:border-l lg:pl-6">
+          <div class="flex items-center gap-2 mb-4">
+            <label for="pnl-heatmap-year" class="text-xs font-medium text-slate-500 whitespace-nowrap">Year</label>
+            <select id="pnl-heatmap-year"
+              class="rounded-lg bg-surface border border-slate-700 px-2.5 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent min-w-[5.5rem] w-full max-w-[9rem]">
+              ${yearOpts}
+            </select>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2.5">
+            ${statCardSidebar("Worst day", `<span class="text-loss">${fmtStat(dayBw.worstDay)}</span>`)}
+            ${statCardSidebar("Best day", `<span class="text-gain">${fmtStat(dayBw.bestDay)}</span>`)}
+            ${statCardSidebar("Worst trade", `<span class="text-loss">${fmtStat(stats.biggestLoser)}</span>`)}
+            ${statCardSidebar("Best trade", `<span class="text-gain">${fmtStat(stats.biggestWinner)}</span>`)}
+            ${statCardSidebar("Avg losing trade", `<span class="text-loss">${fmtStat(stats.avgLoser)}</span>`)}
+            ${statCardSidebar("Avg winning trade", `<span class="text-gain">${fmtStat(stats.avgWinner)}</span>`)}
+          </div>
+        </div>
+      </div>
+    </section>`;
 }
 
 /** All Mon–Fri weeks that overlap `[monthFirst, monthLast]`. */
@@ -291,7 +631,9 @@ function getWeekRowsForMonth(y, mo) {
 }
 
 function dayStats(trades, dateKey) {
-  const dayTrades = trades.filter((t) => t.dateKey === dateKey);
+  const dayTrades = trades.filter(
+    (t) => canonicalDateKey(t.dateKey) === dateKey,
+  );
   const pnl = dayTrades.reduce((s, t) => s + t.pnl, 0);
   const wins = dayTrades.filter((t) => t.win).length;
   const losses = dayTrades.length - wins;
@@ -299,7 +641,9 @@ function dayStats(trades, dateKey) {
 }
 
 function weekStats(trades, dateKeys) {
-  const weekTrades = trades.filter((t) => dateKeys.includes(t.dateKey));
+  const weekTrades = trades.filter((t) =>
+    dateKeys.includes(canonicalDateKey(t.dateKey)),
+  );
   const pnl = weekTrades.reduce((s, t) => s + t.pnl, 0);
   const wins = weekTrades.filter((t) => t.win).length;
   const losses = weekTrades.length - wins;
@@ -560,7 +904,7 @@ function accountPageHtml() {
         <div class="flex items-center justify-between">
           <div>
             <p class="text-sm text-slate-300">Delete all trades</p>
-            <p class="text-xs text-slate-500">Removes all trades and meta data. Cannot be undone.</p>
+            <p class="text-xs text-slate-500">Removes trades, notes/meta, balance history, and import records (including tags). Cannot be undone.</p>
           </div>
           <button type="button" id="delete-trades-btn"
             class="px-4 py-2 rounded-lg bg-loss/15 text-loss text-sm border border-loss/30 hover:bg-loss/25 transition-colors">
@@ -587,8 +931,26 @@ function tradeImportPageHtml() {
     <section class="rounded-xl border border-slate-800 bg-surface-raised p-5 max-w-xl space-y-4">
       <h2 class="text-sm font-medium text-slate-400">Import trades</h2>
       <p class="text-sm text-slate-500">
-        Pick one or more Schwab cash journal CSVs — same parser as <span class="text-slate-400">Load CSV</span> in the header.
+        Pick one or more Schwab cash journal CSVs.
       </p>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-500 mb-1">Broker</label>
+        <select id="import-broker"
+          class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent">
+          <option value="Schwab">Schwab</option>
+          <option value="ToS">ThinkOrSwim</option>
+          <option value="Webull">Webull</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-500 mb-1">Tags (comma separated)</label>
+        <input type="text" id="import-tags" placeholder="e.g. ORB, momentum"
+          class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent" />
+      </div>
+
       <input type="file" accept=".csv,text/csv" multiple class="hidden" id="file-input" />
       <button type="button" id="import-csv-trigger"
         class="inline-flex items-center justify-center min-h-[44px] px-4 py-2 rounded-lg bg-accent/15 text-accent text-sm font-medium hover:bg-accent/25 transition-colors border border-accent/30">
@@ -601,8 +963,6 @@ function tradeImportPageHtml() {
 function render() {
   closeMobileNav();
   const root = $("#app");
-  const m = state.metrics;
-  const trades = state.trades;
   const dayFilter = state.selectedDay;
   const { page } = state;
   const onDashboard = page === Page.Dashboard;
@@ -612,6 +972,78 @@ function render() {
   /** Equity curve, statistics (KPIs + sparkline), weekday chart — not on Account / Import. */
   const showChartsRow = onDashboard || onCalendar;
 
+  const tagOptions = uniqueSortedTagsFromImports(state.imports);
+  if (state.dashboardTagFilter && !tagOptions.includes(state.dashboardTagFilter)) {
+    state.dashboardTagFilter = "";
+  }
+
+  const wantTag = (state.dashboardTagFilter || "").trim();
+  const tradesLinked = state.trades.some((t) => normImportId(t.importId) !== "");
+  const tradesView = filteredTradesByTag(
+    state.trades,
+    state.imports,
+    state.dashboardTagFilter,
+  );
+  const tagWarnNoLinks = Boolean(
+    wantTag && state.trades.length > 0 && !tradesLinked,
+  );
+  const tagWarnNoMatches = Boolean(
+    wantTag && tradesLinked && tradesView.length === 0 && state.trades.length > 0,
+  );
+  const m = computeMetrics(tradesView);
+  const trades = tradesView;
+
+  const filesLabelExtra =
+    (state.dashboardTagFilter || "").trim() !== ""
+      ? ` · tag: ${state.dashboardTagFilter}`
+      : "";
+
+  const showTagFilterUi =
+    showChartsRow &&
+    (state.trades.length > 0 || state.imports.length > 0);
+  const tagFilterHint =
+    tagOptions.length > 0
+      ? "Stats, equity curve, weekday chart, P&amp;L heatmap, and calendar use only trades from imports that include the tag you pick."
+      : state.imports.length === 0
+        ? "Tags are stored on each upload from the Import trades page. If this list stays empty, reload after saving a CSV there (with optional Tags filled in)."
+        : "No tags on your imports yet. Open Import trades, type tags (comma-separated) next to Tags, then upload your CSV so filters can use them.";
+  const tagFilterWarnHtml = tagWarnNoLinks
+    ? `<div class="mb-3 rounded-lg border border-amber-500/45 bg-amber-950/55 px-3 py-2.5 text-xs text-amber-100 leading-relaxed">
+        Your saved <strong>round trips</strong> are missing <span class="font-mono text-amber-200/90">import_id</span>, so they cannot be matched to an import’s tags. Tag filtering is disabled until you <strong>re-upload</strong> those CSVs from <strong>Import trades</strong> (each run links trades to that import).
+      </div>`
+    : tagWarnNoMatches
+      ? `<div class="mb-3 rounded-lg border border-slate-600 bg-slate-800/90 px-3 py-2.5 text-xs text-slate-300 leading-relaxed">
+        No trades reference an import tagged <strong>${escapeHtml(state.dashboardTagFilter)}</strong>. Pick another tag or <strong>All tags</strong>.
+      </div>`
+      : "";
+
+  const tagFilterBarHtml = showTagFilterUi
+    ? `<section class="rounded-xl border border-accent/25 bg-accent/5 px-4 py-4 mb-6 shadow-sm" aria-labelledby="dashboard-tag-filter-heading">
+        <h3 id="dashboard-tag-filter-heading" class="text-sm font-semibold text-slate-200 mb-3">Filter by import tag</h3>
+        ${tagFilterWarnHtml}
+        <div class="flex flex-col lg:flex-row lg:items-end gap-4">
+          <div class="flex flex-col gap-1.5 shrink-0">
+            <label for="dashboard-tag-filter" class="text-xs font-medium text-slate-400">Import tag</label>
+            <select id="dashboard-tag-filter" class="rounded-lg bg-surface border border-slate-600 px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-accent min-h-[44px] w-full sm:min-w-[12rem] sm:max-w-[20rem]">
+              <option value="">All tags</option>
+              ${tagOptions
+                .map(
+                  (t) =>
+                    `<option value="${escapeAttr(t)}"${t === state.dashboardTagFilter ? " selected" : ""}>${escapeHtml(t)}</option>`,
+                )
+                .join("")}
+            </select>
+          </div>
+          <p class="text-xs text-slate-500 leading-relaxed min-w-0 flex-1">${tagFilterHint}</p>
+        </div>
+      </section>`
+    : "";
+
+  const heatmapYears = onDashboard ? pnlHeatmapYearOptions(trades) : [];
+  if (onDashboard && heatmapYears.length && !heatmapYears.includes(state.pnlHeatmapYear)) {
+    state.pnlHeatmapYear = heatmapYears[0];
+  }
+
   const cal = state.calendarMonth;
   let calendarTableTrades = tradesClosedInMonth(
     trades,
@@ -620,7 +1052,7 @@ function render() {
   );
   if (dayFilter != null) {
     calendarTableTrades = calendarTableTrades
-      .filter((t) => t.dateKey === dayFilter)
+      .filter((t) => canonicalDateKey(t.dateKey) === dayFilter)
       .sort((a, b) => a.closeTs - b.closeTs);
   } else {
     calendarTableTrades = [...calendarTableTrades].sort(
@@ -726,7 +1158,8 @@ function render() {
     </header>
 
     <main class="max-w-7xl mx-auto px-3 sm:px-4 py-6 sm:py-8 space-y-8 sm:space-y-10 w-full min-w-0">
-      <p class="text-sm text-slate-500" id="file-status">${state.filesLabel}</p>
+      <p class="text-sm text-slate-500" id="file-status">${escapeHtml(state.filesLabel)}${escapeHtml(filesLabelExtra)}</p>
+      ${tagFilterBarHtml}
 
       ${onDashboard ? dashboardStatsHtml : ""}
       ${onAccount ? accountPageHtml() : ""}
@@ -766,6 +1199,8 @@ function render() {
       </section>`
           : ""
       }
+
+      ${onDashboard ? renderPnlHeatmapSectionHtml(m?.byDayPnl, trades, state.pnlHeatmapYear, heatmapYears) : ""}
 
       ${onCalendar ? calendarHtml : ""}
     </main>
@@ -1123,6 +1558,19 @@ async function promptDeleteTrade() {
 }
 
 function bind() {
+  $("#pnl-heatmap-year")?.addEventListener("change", (e) => {
+    const v = Number(e.target.value);
+    if (Number.isFinite(v)) {
+      state.pnlHeatmapYear = v;
+      render();
+    }
+  });
+
+  $("#dashboard-tag-filter")?.addEventListener("change", (e) => {
+    state.dashboardTagFilter = e.target.value || "";
+    render();
+  });
+
   $("#import-csv-trigger")?.addEventListener("click", () => {
     $("#file-input")?.click();
   });
@@ -1130,47 +1578,121 @@ function bind() {
   $("#file-input")?.addEventListener("change", async (e) => {
     const input = e.target;
     const files = input.files;
-    
     if (!files?.length) return;
+
+    const broker = $("#import-broker")?.value || "Unknown";
+    const tagsRaw = $("#import-tags")?.value || "";
+    const tags = tagsRaw.split(",").map(t => t.trim()).filter(Boolean);
+    const filename = [...files].map(f => f.name).join(", ");
+
+    let importRecord;
+    try {
+        importRecord = await apiCreateImport(broker, tags, filename);
+    } catch (err) {
+        alert(`Failed to create import: ${err.message}`);
+        input.value = "";
+        return;
+    }
+    if (!importRecord?.id) {
+        alert("Import did not return an id. Check the server and database imports table.");
+        input.value = "";
+        return;
+    }
+
     const parts = await parseFiles(files);
     const { fills, balancePoints } = mergeExtracts(parts);
-    const userId = localStorage.getItem("user_id"); 
+    const userId = localStorage.getItem("user_id");
     const trades = buildRoundTripTrades(fills, userId);
+
     try {
-      await apiUpsertTrades(trades);
+        await apiUpsertTrades(trades, importRecord.id);
     } catch (err) {
-      console.error("Failed to save trades:", err);
-      state.filesLabel = `Could not save trades: ${err.message}`;
-      alert(
-        `Trades were not saved to your account (the dashboard would look fine until you refresh).\n\n${err.message}\n\nTry again, or check that you are logged in and the network is OK.`,
-      );
-      input.value = "";
-      return;
+        console.error("Failed to save trades:", err);
+        state.filesLabel = `Could not save trades: ${err.message}`;
+        alert(`Trades were not saved to your account.\n\n${err.message}\n\nTry again, or check that you are logged in and the network is OK.`);
+        input.value = "";
+        return;
     }
     try {
-      await apiUpsertBalance(balancePoints);
+        await apiUpsertBalance(balancePoints, importRecord.id);
     } catch (err) {
-      console.error("Failed to save balance:", err);
-      alert(
-        `Trades were saved, but account balance snapshots failed to save.\n\n${err.message}\n\nThe equity curve may be empty after you log in again until you re-upload or we fix the error.`,
-      );
+        console.error("Failed to save balance:", err);
+        alert(`Trades were saved, but account balance snapshots failed to save.\n\n${err.message}`);
     }
-    state.trades = trades;
+    try {
+      const [allRows, allBal] = await Promise.all([
+        apiGetTrades(),
+        apiGetBalance(),
+      ]);
+      state.trades = (allRows || []).map((r) => ({
+        id: r.id,
+        symbol: r.symbol,
+        openSide: r.open_side,
+        dateKey: r.date_key,
+        openTs: r.open_ts,
+        closeTs: r.close_ts,
+        pnl: r.pnl,
+        maxShares: r.max_shares,
+        shareTurnover: r.share_turnover,
+        twoWayNotional: r.two_way_notional,
+        returnPerDollar: r.return_per_dollar,
+        win: r.pnl > 0,
+        importId: r.import_id ?? null,
+      }));
+      state.balanceSnapshots = (allBal || []).map((r) => ({
+        ts: r.ts,
+        dateKey: r.date_key,
+        balance: r.balance,
+        importId: r.import_id ?? null,
+      }));
+    } catch (e) {
+      console.error("Failed to reload trades/balance after import:", e);
+      state.trades = trades.map((t) => ({ ...t, importId: importRecord.id }));
+      state.balanceSnapshots = balancePoints.map((p) => ({
+        ts: p.ts,
+        dateKey: p.dateKey,
+        balance: p.balance,
+        importId: importRecord.id,
+      }));
+    }
     state.fileLoadInfo = { fileCount: parts.length, fillCount: fills.length };
     await hydrateTradeMeta();
-    state.metrics = computeMetrics(trades);
-    state.equity = buildEquitySeries(balancePoints);
+    state.metrics = computeMetrics(state.trades);
+    try {
+      state.imports = await apiGetImports();
+    } catch (e) {
+      console.error("Failed to refresh imports:", e);
+    }
+    // Keep tags visible: merge create response + form tags if GET omits or shapes tags oddly.
+    if (importRecord.id && tags.length) {
+      const fromCreate = importTagsAsArray(importRecord.tags);
+      const mergedTags = fromCreate.length ? fromCreate : tags;
+      const idx = state.imports.findIndex((im) => im.id === importRecord.id);
+      if (idx === -1) {
+        state.imports.unshift({
+          ...importRecord,
+          tags: mergedTags,
+          broker,
+          filename,
+        });
+      } else {
+        const row = state.imports[idx];
+        if (!importTagsAsArray(row.tags).length) {
+          row.tags = mergedTags;
+        }
+      }
+    }
     state.filesLabel = `Loaded ${parts.length} file(s) · ${fills.length} fills · ${trades.length} counted round trips`;
     if (trades.length) {
-      state.calendarMonth = new Date(trades[0].closeTs);
+        state.calendarMonth = new Date(trades[0].closeTs);
     }
     state.selectedDay = null;
     if (isActivePage(Page.TradeImport)) {
-      state.page = Page.Dashboard;
+        state.page = Page.Dashboard;
     }
     render();
     input.value = "";
-  });
+});
 
   $("#cal-prev")?.addEventListener("click", () => {
     state.calendarMonth = new Date(
@@ -1295,11 +1817,19 @@ function bind() {
     });
   
     $("#delete-trades-btn")?.addEventListener("click", async () => {
-      if (!confirm("Delete all trades? This cannot be undone.")) return;
+      if (
+        !confirm(
+          "Delete all trades, import history (tags), and balance snapshots? This cannot be undone.",
+        )
+      )
+        return;
       try {
         await apiDeleteAllTrades();
         state.trades = [];
         state.metrics = null;
+        state.balanceSnapshots = [];
+        state.imports = [];
+        state.dashboardTagFilter = "";
         state.tradeMetaById.clear();
         state.screenshotUrls.clear();
         state.filesLabel = "No files loaded";
@@ -1337,16 +1867,28 @@ function paintCharts() {
 
   const onCalendar = isActivePage(Page.Calendar);
 
-  let equitySlice = state.equity;
-  let weekdayBars = state.metrics?.byWeekday;
-  let tradesForKpis = state.trades;
+  const tradesView = filteredTradesByTag(
+    state.trades,
+    state.imports,
+    state.dashboardTagFilter,
+  );
+  const balFiltered = filteredBalanceSnapshotsByTag(
+    state.balanceSnapshots,
+    state.imports,
+    state.dashboardTagFilter,
+  );
+  const equityFiltered = buildEquitySeries(balFiltered);
+
+  let equitySlice = equityFiltered;
+  let weekdayBars = computeMetrics(tradesView).byWeekday;
+  let tradesForKpis = tradesView;
 
   if (onCalendar) {
     const d = state.calendarMonth;
     const y = d.getFullYear();
     const mo = d.getMonth();
-    equitySlice = equitySeriesForMonth(state.equity, y, mo);
-    tradesForKpis = tradesClosedInMonth(state.trades, y, mo);
+    equitySlice = equitySeriesForMonth(equityFiltered, y, mo);
+    tradesForKpis = tradesClosedInMonth(tradesView, y, mo);
     weekdayBars = computeMetrics(tradesForKpis).byWeekday;
     if (kpiPeriod) {
       kpiPeriod.textContent = d.toLocaleString(undefined, {
@@ -1359,11 +1901,11 @@ function paintCharts() {
   }
 
   const cumSeries = onCalendar
-    ? cumulativePnlDailySeries(state.trades, {
+    ? cumulativePnlDailySeries(tradesView, {
         y: state.calendarMonth.getFullYear(),
         mo: state.calendarMonth.getMonth(),
       })
-    : cumulativePnlDailySeries(state.trades, null);
+    : cumulativePnlDailySeries(tradesView, null);
   const cumEnd =
     cumSeries.length > 0
       ? cumSeries[cumSeries.length - 1].cumulative
@@ -1454,7 +1996,11 @@ function paintCalendar() {
     year: "numeric",
   });
 
-  const trades = state.trades;
+  const trades = filteredTradesByTag(
+    state.trades,
+    state.imports,
+    state.dashboardTagFilter,
+  );
   const weekRows = getWeekRowsForMonth(y, mo);
   const colTemplate =
     "grid-cols-[repeat(5,minmax(0,1fr))_minmax(9.5rem,1fr)] sm:grid-cols-[repeat(5,minmax(0,1fr))_minmax(12rem,1fr)]";
@@ -1733,46 +2279,62 @@ if (!isPasswordRecovery) {
   if (!isLoggedIn()) {
     showAuthScreen();
   } else {
-    apiGetTrades().then(async (rows) => {
-      if (rows.length) {
-        state.trades = rows.map(r => ({
-          id: r.id,
-          symbol: r.symbol,
-          openSide: r.open_side,
-          dateKey: r.date_key,
-          openTs: r.open_ts,
-          closeTs: r.close_ts,
-          pnl: r.pnl,
-          maxShares: r.max_shares,
-          shareTurnover: r.share_turnover,
-          twoWayNotional: r.two_way_notional,
-          returnPerDollar: r.return_per_dollar,
-          win: r.pnl > 0,
-        }));
-        state.metrics = computeMetrics(state.trades);
-        state.calendarMonth = new Date(state.trades[state.trades.length - 1].closeTs);
-        state.filesLabel = `${state.trades.length} trades loaded from database`;
-
+    apiGetTrades()
+      .then(async (rows) => {
+        let importRows = [];
         try {
-          const balanceRows = await apiGetBalance();
-          if (balanceRows.length) {
-            state.equity = buildEquitySeries(
-              balanceRows.map((r) => ({
-                ts: r.ts,
-                dateKey: r.date_key,
-                balance: r.balance,
-              })),
-            );
-          }
-        } catch (err) {
-          console.error("Failed to load balance:", err);
+          importRows = await apiGetImports();
+        } catch (e) {
+          console.error("Failed to load imports:", e);
         }
-      }
-      await hydrateTradeMeta();
-      render();
-    }).catch(err => {
-      console.error("Failed to load trades:", err);
-      render();
-    });
+        state.imports = Array.isArray(importRows) ? importRows : [];
+        if (rows.length) {
+          state.trades = rows.map((r) => ({
+            id: r.id,
+            symbol: r.symbol,
+            openSide: r.open_side,
+            dateKey: r.date_key,
+            openTs: r.open_ts,
+            closeTs: r.close_ts,
+            pnl: r.pnl,
+            maxShares: r.max_shares,
+            shareTurnover: r.share_turnover,
+            twoWayNotional: r.two_way_notional,
+            returnPerDollar: r.return_per_dollar,
+            win: r.pnl > 0,
+            importId: r.import_id ?? null,
+          }));
+          state.metrics = computeMetrics(state.trades);
+          state.calendarMonth = new Date(
+            state.trades[state.trades.length - 1].closeTs,
+          );
+          state.filesLabel = `${state.trades.length} trades loaded from database`;
+
+          try {
+            const balanceRows = await apiGetBalance();
+            state.balanceSnapshots = balanceRows.length
+              ? balanceRows.map((r) => ({
+                  ts: r.ts,
+                  dateKey: r.date_key,
+                  balance: r.balance,
+                  importId: r.import_id ?? null,
+                }))
+              : [];
+          } catch (err) {
+            console.error("Failed to load balance:", err);
+            state.balanceSnapshots = [];
+          }
+        } else {
+          state.trades = [];
+          state.metrics = null;
+          state.balanceSnapshots = [];
+        }
+        await hydrateTradeMeta();
+        render();
+      })
+      .catch((err) => {
+        console.error("Failed to load trades:", err);
+        render();
+      });
   }
 }

@@ -76,11 +76,12 @@ export async function apiUploadScreenshot(file) {
     return data.url;
 }
 
-export async function apiUpsertTrades(trades) {
+export async function apiUpsertTrades(trades, importId = null) {
     const res = await fetchWithRefresh(`${API}/api/trades`, {
         method: "POST",
         body: JSON.stringify(trades.map(t => ({
             id: t.id,
+            import_id: importId ?? null,
             symbol: t.symbol,
             open_side: t.openSide,
             date_key: t.dateKey,
@@ -137,13 +138,19 @@ export async function apiDeleteAccount() {
     return res.json();
 }
 
-export async function apiUpsertBalance(snapshots) {
-    const res = await fetchWithRefresh(`${API}/api/balance`, {
+export async function apiUpsertBalance(snapshots, importId = null) {
+    const params = new URLSearchParams();
+    if (importId != null && String(importId).trim() !== "") {
+        params.set("import_id", String(importId));
+    }
+    const qs = params.toString() ? `?${params}` : "";
+    const res = await fetchWithRefresh(`${API}/api/balance${qs}`, {
         method: "POST",
         body: JSON.stringify(snapshots.map(s => ({
             ts: s.ts,
             date_key: s.dateKey,
             balance: s.balance,
+            import_id: importId ?? null,
         })))
     });
     if (!res.ok) throw new Error("Failed to save balance");
@@ -154,5 +161,40 @@ export async function apiGetBalance() {
     const res = await fetchWithRefresh(`${API}/api/balance`);
     if (!res.ok) throw new Error("Failed to fetch balance");
     const data = await res.json();
+    return Array.isArray(data) ? data : [];
+}
+
+export async function apiCreateImport(broker, tags, filename) {
+    const res = await fetchWithRefresh(`${API}/api/imports`, {
+        method: "POST",
+        body: JSON.stringify({ broker, tags, filename })
+    });
+    if (!res.ok) throw new Error("Failed to create import");
+    const data = await res.json();
+    // PostgREST / Supabase insert returns an array of inserted rows.
+    if (Array.isArray(data)) return data[0] ?? null;
+    return data ?? null;
+}
+
+export async function apiGetImports() {
+    const res = await fetchWithRefresh(`${API}/api/imports`);
+    const rawText = await res.text();
+    if (!res.ok) {
+        let msg = rawText.trim() || `Failed to fetch imports (${res.status})`;
+        try {
+            const errBody = JSON.parse(rawText);
+            if (typeof errBody?.detail === "string") msg = errBody.detail;
+            else if (errBody?.detail != null) msg = JSON.stringify(errBody.detail);
+        } catch {
+            /* plain text body */
+        }
+        throw new Error(msg.slice(0, 800));
+    }
+    let data;
+    try {
+        data = JSON.parse(rawText);
+    } catch {
+        return [];
+    }
     return Array.isArray(data) ? data : [];
 }

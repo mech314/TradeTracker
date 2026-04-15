@@ -6,7 +6,7 @@ from typing import Optional
 from pydantic import BaseModel
 from supabase import create_client, Client
 
-from fastapi import FastAPI, HTTPException, Depends, Security, UploadFile, File, Body
+from fastapi import FastAPI, HTTPException, Depends, Security, UploadFile, File, Body, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -64,11 +64,13 @@ class RoundTrip(BaseModel):
     share_turnover: Optional[float] = None
     two_way_notional: Optional[float] = None
     return_per_dollar: Optional[float] = None
+    import_id: Optional[str] = None
 
 class BalanceSnapshot(BaseModel):
     ts: int
     date_key: str
     balance: float
+    import_id: Optional[str] = None
 
 class ImportCreate(BaseModel):
     broker: str
@@ -157,6 +159,7 @@ async def upsert_trades(trades: list[RoundTrip], user=Depends(get_current_user))
         {
             "id": t.id,
             "user_id": user.id,
+            "import_id": t.import_id,
             "symbol": t.symbol,
             "open_side": t.open_side,
             "date_key": t.date_key,
@@ -210,14 +213,25 @@ async def forgot_password(body: dict = Body(...)):
 
 @app.delete("/api/account/trades")
 async def delete_all_trades(user=Depends(get_current_user)):
+    """
+    Remove all trading data for the user: round trips, meta, balance snapshots,
+    and import rows (so import tags disappear). Order respects typical FKs
+    (trades → imports, balance → imports).
+    """
     supabase_admin.table("round_trips").delete().eq("user_id", user.id).execute()
     supabase_admin.table("trade_meta").delete().eq("user_id", user.id).execute()
-    return {"message": "All trades and meta data deleted successfully"}
+    supabase_admin.table("balance_snapshots").delete().eq("user_id", user.id).execute()
+    supabase_admin.table("imports").delete().eq("user_id", user.id).execute()
+    return {
+        "message": "All trades, meta, balance history, and import records (tags) deleted successfully",
+    }
 
 @app.delete("/api/account")
 async def delete_account(user=Depends(get_current_user)):
     supabase_admin.table("round_trips").delete().eq("user_id", user.id).execute()
     supabase_admin.table("trade_meta").delete().eq("user_id", user.id).execute()
+    supabase_admin.table("balance_snapshots").delete().eq("user_id", user.id).execute()
+    supabase_admin.table("imports").delete().eq("user_id", user.id).execute()
     try:
         supabase_admin.storage.from_("screenshots").remove([f"{user.id}/"])
     except Exception as e:
@@ -226,16 +240,50 @@ async def delete_account(user=Depends(get_current_user)):
     return {"message": "Account deleted successfully"}
 
 @app.post("/api/balance")
-async def upsert_balance(snapshots: list[BalanceSnapshot], user=Depends(get_current_user)):
-    supabase_admin.table("balance_snapshots").delete().eq("user_id", user.id).execute()
+async def upsert_balance(
+    snapshots: list[BalanceSnapshot],
+    user=Depends(get_current_user),
+    import_id: Optional[str] = Query(
+        None,
+        description="Import this upload belongs to; only those rows are replaced (other imports kept).",
+    ),
+):
+    """
+    Replace balance history for one import at a time. Older behavior deleted every
+    snapshot for the user, which broke per-tag equity when multiple CSVs were loaded.
+    """
+    body_ids = {s.import_id for s in snapshots if s.import_id}
+    if len(body_ids) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="All balance snapshots in one request must share the same import_id",
+        )
+    body_import = next(iter(body_ids)) if body_ids else None
+    if import_id and body_import and import_id != body_import:
+        raise HTTPException(
+            status_code=400,
+            detail="import_id query parameter must match snapshot import_id fields",
+        )
+    scope = body_import or import_id
+
+    if scope:
+        supabase_admin.table("balance_snapshots").delete().eq("user_id", user.id).eq(
+            "import_id", scope
+        ).execute()
+    elif snapshots:
+        # Legacy: snapshots with no import_id — replace entire table for this user
+        supabase_admin.table("balance_snapshots").delete().eq("user_id", user.id).execute()
+
     if not snapshots:
         return []
+
     rows = [
         {
             "user_id": user.id,
             "ts": s.ts,
             "date_key": s.date_key,
             "balance": s.balance,
+            "import_id": s.import_id or scope,
         }
         for s in snapshots
     ]
@@ -283,6 +331,37 @@ async def create_import(body: ImportCreate, user=Depends(get_current_user)):
         "filename": body.filename
     }).execute()
     return res.data
+
+@app.get("/api/imports")
+async def list_imports(user=Depends(get_current_user)):
+    """
+    List imports for the user. Uses select('*') and no server-side order so we
+    do not depend on columns (e.g. created_at) that may be missing on older schemas.
+    """
+    try:
+        res = (
+            supabase_admin.table("imports")
+            .select("*")
+            .eq("user_id", user.id)
+            .execute()
+        )
+        rows = list(res.data or [])
+        # Sort in app if a timestamp exists; otherwise keep DB order.
+        def _sort_ts(row: dict):
+            for key in ("created_at", "inserted_at", "updated_at"):
+                v = row.get(key)
+                if v is not None:
+                    return str(v)
+            return ""
+
+        rows.sort(key=_sort_ts, reverse=True)
+        return rows
+    except Exception as e:
+        logger.exception("GET /api/imports failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not load imports: {e!s}",
+        ) from e
 
 if STATIC.is_dir():
     app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
