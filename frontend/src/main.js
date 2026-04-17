@@ -904,7 +904,7 @@ function accountPageHtml() {
         <div class="flex items-center justify-between">
           <div>
             <p class="text-sm text-slate-300">Delete all trades</p>
-            <p class="text-xs text-slate-500">Removes trades, notes/meta, balance history, and import records (including tags). Cannot be undone.</p>
+            <p class="text-xs text-slate-500">Removes trades, notes/meta and balance. Cannot be undone.</p>
           </div>
           <button type="button" id="delete-trades-btn"
             class="px-4 py-2 rounded-lg bg-loss/15 text-loss text-sm border border-loss/30 hover:bg-loss/25 transition-colors">
