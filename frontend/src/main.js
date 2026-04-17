@@ -28,22 +28,27 @@ import {
   register, 
   logout } 
   from "./auth.js";
-import { 
-  apiGetAllMeta, 
-  apiUpsertMeta, 
-  apiDeleteMeta, 
-  apiUploadScreenshot, 
-  apiUpsertTrades, 
-  apiGetTrades, 
-  apiDeleteTrade, 
-  apiChangePassword, 
-  apiDeleteAllTrades, 
+import {
+  apiGetAllMeta,
+  apiUpsertMeta,
+  apiDeleteMeta,
+  apiUploadScreenshot,
+  apiUpsertTrades,
+  apiGetTrades,
+  apiDeleteTrade,
+  apiChangePassword,
+  apiDeleteAllTrades,
   apiDeleteAccount,
   apiUpsertBalance,
   apiGetBalance,
   apiCreateImport,
   apiGetImports,
+  apiGetAccounts,
+  apiCreateTradingAccount,
+  apiDeleteTradingAccount,
+  apiBackfillTradingAccounts,
 } from "./api.js";
+import Fuse from "fuse.js";
 
 function showAuthScreen() {
   document.querySelector("#app").innerHTML = `
@@ -134,6 +139,40 @@ const Page = Object.freeze({
 
 const ALL_PAGE_IDS = Object.freeze(Object.values(Page));
 
+const LS_UPLOAD_ACCOUNT = "tradetracker_upload_account_id";
+const LS_DISPLAY_ACCOUNT = "tradetracker_display_account_id";
+const LS_DASHBOARD_TAGS = "tradetracker_dashboard_tags";
+
+function readDashboardTagFiltersFromStorage() {
+  try {
+    const raw = localStorage.getItem(LS_DASHBOARD_TAGS);
+    if (raw) {
+      const j = JSON.parse(raw);
+      if (Array.isArray(j)) {
+        return [
+          ...new Set(
+            j.map((x) => String(x).trim()).filter(Boolean),
+          ),
+        ];
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return [];
+}
+
+function persistDashboardTagFilters() {
+  try {
+    localStorage.setItem(
+      LS_DASHBOARD_TAGS,
+      JSON.stringify(state.dashboardTagFilters),
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
 function isActivePage(id) {
   return state.page === id;
 }
@@ -145,8 +184,14 @@ let state = {
   balanceSnapshots: [],
   /** User import records (includes `tags`); from GET /api/imports. */
   imports: [],
-  /** When set, dashboard + calendar charts/tables use only trades whose import lists this tag. */
-  dashboardTagFilter: "",
+  /** Named accounts (label + broker); from GET /api/accounts. */
+  tradingAccounts: [],
+  /** CSV uploads are linked to this trading_accounts row. */
+  uploadAccountId: localStorage.getItem(LS_UPLOAD_ACCOUNT) ?? "",
+  /** Dashboard + calendar scope: "" = all accounts, else trading_accounts id. */
+  displayAccountId: localStorage.getItem(LS_DISPLAY_ACCOUNT) ?? "",
+  /** Dashboard + calendar: filter to imports that have any of these strategy tags (OR). */
+  dashboardTagFilters: readDashboardTagFiltersFromStorage(),
   filesLabel: "No files loaded",
   /** Set when CSVs are loaded: used to refresh the status line after deleting trades. */
   fileLoadInfo: null,
@@ -165,6 +210,8 @@ let metaPopoverAnchor = null;
 let metaPopoverDocumentCloseBound = false;
 let modalScreenshotExplicitlyCleared = false;
 let tradeMenuTradeId = null;
+let dashboardTagSuggestHighlight = -1;
+let dashboardTagBlurHideTimer = null;
 
 /** Normalize `imports.tags` from API (array, JSON string, comma-separated string, or array-like object). */
 function importTagsAsArray(raw) {
@@ -209,56 +256,213 @@ function uniqueSortedTagsFromImports(imports) {
   return [...set].sort((a, b) => a.localeCompare(b));
 }
 
+function tradeMetaTagsNormalized(meta) {
+  const raw = meta?.tags;
+  if (raw == null) return [];
+  if (Array.isArray(raw)) {
+    return [
+      ...new Set(raw.map((x) => String(x).trim()).filter(Boolean)),
+    ];
+  }
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    if (!s) return [];
+    if (s.startsWith("[")) {
+      try {
+        const j = JSON.parse(s);
+        if (Array.isArray(j)) {
+          return tradeMetaTagsNormalized({ tags: j });
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+    return [
+      ...new Set(s.split(",").map((t) => t.trim()).filter(Boolean)),
+    ];
+  }
+  return [];
+}
+
+/** Import tags ∪ per-trade meta tags (account-scoped trades), sorted. */
+function mergedDashboardTagOptions(importsScope, accountScopedTrades) {
+  const set = new Set(uniqueSortedTagsFromImports(importsScope));
+  for (const t of accountScopedTrades || []) {
+    const m = state.tradeMetaById.get(t.id);
+    for (const tag of tradeMetaTagsNormalized(m)) {
+      set.add(tag);
+    }
+  }
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+
 /** Canonical form for comparing import UUIDs from DB vs API (case / whitespace). */
 function normImportId(v) {
   if (v == null || v === "") return "";
   return String(v).trim().toLowerCase();
 }
 
-/** `null` = no tag selected; otherwise Set of normalized import ids whose tags include `tag`. */
-function importIdsWithTag(imports, tag) {
-  const want = (tag || "").trim();
+function importIdsForTradingAccount(imports, accountId) {
+  const want = normImportId(accountId);
   if (!want) return null;
-  const ids = new Set();
+  const set = new Set();
   for (const im of imports || []) {
-    const row = importTagsAsArray(im.tags);
-    if (row.some((x) => String(x).trim() === want)) {
-      const nid = normImportId(im.id);
-      if (nid) ids.add(nid);
+    if (normImportId(im.account_id) === want) {
+      const iid = normImportId(im.id);
+      if (iid) set.add(iid);
     }
   }
-  return ids;
+  return set;
 }
 
-function filteredTradesByTag(trades, imports, tag) {
-  const want = (tag || "").trim();
-  if (!want) return trades;
-  const anyTradeLinked = trades.some((t) => normImportId(t.importId) !== "");
-  if (!anyTradeLinked) {
-    return trades;
+function filteredTradesByAccount(trades, imports, accountId) {
+  const set = importIdsForTradingAccount(imports, accountId);
+  if (set == null) return trades || [];
+  return (trades || []).filter((t) => set.has(normImportId(t.importId)));
+}
+
+function importsInDisplayScope(imports, accountId) {
+  const want = normImportId(accountId);
+  if (!want) return imports || [];
+  return (imports || []).filter(
+    (im) => normImportId(im.account_id) === want,
+  );
+}
+
+function dashboardScope() {
+  const importsScope = importsInDisplayScope(
+    state.imports,
+    state.displayAccountId,
+  );
+  const baseTrades = filteredTradesByAccount(
+    state.trades,
+    state.imports,
+    state.displayAccountId,
+  );
+  const tradesView = filteredTradesByTagsAny(
+    baseTrades,
+    importsScope,
+    state.dashboardTagFilters,
+  );
+  return { importsScope, baseTrades, tradesView };
+}
+
+function syncTradingAccountPickerState() {
+  const ids = new Set(
+    (state.tradingAccounts || []).map((a) => normImportId(a.id)),
+  );
+  if (state.uploadAccountId && !ids.has(normImportId(state.uploadAccountId))) {
+    state.uploadAccountId = "";
+    localStorage.removeItem(LS_UPLOAD_ACCOUNT);
   }
-  const ids = importIdsWithTag(imports, want);
-  if (!ids || ids.size === 0) return [];
-  return trades.filter((t) => {
-    const pid = normImportId(t.importId);
-    return pid !== "" && ids.has(pid);
-  });
+  if (state.displayAccountId && !ids.has(normImportId(state.displayAccountId))) {
+    state.displayAccountId = "";
+    localStorage.removeItem(LS_DISPLAY_ACCOUNT);
+  }
 }
 
-function filteredBalanceSnapshotsByTag(snapshots, imports, tag) {
-  const want = (tag || "").trim();
-  if (!want) return snapshots || [];
+function tradingAccountById(id) {
+  const w = normImportId(id);
+  return (state.tradingAccounts || []).find(
+    (a) => normImportId(a.id) === w,
+  );
+}
+
+function countImportsForTradingAccount(accountId) {
+  const w = normImportId(accountId);
+  return (state.imports || []).filter((im) => normImportId(im.account_id) === w)
+    .length;
+}
+
+/** Stored `broker` uses compact codes (e.g. ToS); UI shows the same names as the add-account dropdown. */
+function brokerDisplayName(code) {
+  if (code == null || code === "") return "";
+  const s = String(code).trim();
+  const byExact = {
+    Schwab: "Schwab",
+    ToS: "ThinkOrSwim",
+    Webull: "Webull",
+    Other: "Other",
+  };
+  if (Object.prototype.hasOwnProperty.call(byExact, s)) return byExact[s];
+  const lower = s.toLowerCase();
+  if (lower === "tos" || lower === "thinkorswim") return "ThinkOrSwim";
+  if (lower === "schwab") return "Schwab";
+  if (lower === "webull") return "Webull";
+  if (lower === "other") return "Other";
+  return s;
+}
+
+function brokerPlatformSelectHtml(idAttr, selected) {
+  const sel = (v) => (v === selected ? " selected" : "");
+  return `<select id="${idAttr}" class="select-flat w-full min-h-[40px] rounded-lg border border-slate-700 bg-surface px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent/80">
+          <option value="Schwab"${sel("Schwab")}>Schwab</option>
+          <option value="ToS"${sel("ToS")}>ThinkOrSwim</option>
+          <option value="Webull"${sel("Webull")}>Webull</option>
+          <option value="Other"${sel("Other")}>Other</option>
+        </select>`;
+}
+
+/**
+ * Dashboard tag chips use **AND**: every selected tag must appear on the trade’s
+ * import tags and/or that same trade’s meta tags (union), case-insensitive.
+ */
+function tradeMatchesAllDashboardTags(trade, importsScope, wantLc) {
+  if (!wantLc.length) return true;
+  const pid = normImportId(trade.importId);
+  const importLc = [];
+  if (pid) {
+    const im = (importsScope || []).find(
+      (row) => normImportId(row.id) === pid,
+    );
+    if (im) {
+      importLc.push(
+        ...importTagsAsArray(im.tags)
+          .map((x) => String(x).trim().toLowerCase())
+          .filter(Boolean),
+      );
+    }
+  }
+  const meta = state.tradeMetaById.get(trade.id);
+  const tradeLc = tradeMetaTagsNormalized(meta).map((x) => x.toLowerCase());
+  const combined = new Set([...importLc, ...tradeLc]);
+  return wantLc.every((w) => combined.has(w));
+}
+
+function filteredTradesByTagsAny(trades, imports, tags) {
+  const want = Array.isArray(tags)
+    ? [
+        ...new Set(tags.map((t) => String(t).trim()).filter(Boolean)),
+      ]
+    : [];
+  if (!want.length) return trades || [];
+  const wantLc = want.map((t) => t.toLowerCase());
+  return (trades || []).filter((t) =>
+    tradeMatchesAllDashboardTags(t, imports, wantLc),
+  );
+}
+
+/** Balance rows for imports that still appear in this trade subset (used when tag filters are on). */
+function filteredBalanceSnapshotsForTradesSubset(snapshots, tradesSubset) {
+  const ids = new Set();
+  for (const t of tradesSubset || []) {
+    const p = normImportId(t.importId);
+    if (p) ids.add(p);
+  }
   const snaps = snapshots || [];
-  const anySnapLinked = snaps.some((s) => normImportId(s.importId) !== "");
-  if (!anySnapLinked) {
-    return snaps;
+  if (!ids.size) {
+    return snaps.filter((s) => normImportId(s.importId) === "");
   }
-  const ids = importIdsWithTag(imports, want);
-  if (!ids || ids.size === 0) return [];
   return snaps.filter((s) => {
-    const pid = normImportId(s.importId);
-    return pid !== "" && ids.has(pid);
+    const p = normImportId(s.importId);
+    return p === "" || ids.has(p);
   });
+}
+
+function filteredBalanceSnapshotsByAccount(snapshots, imports, accountId) {
+  const set = importIdsForTradingAccount(imports, accountId);
+  if (set == null) return snapshots || [];
+  return (snapshots || []).filter((s) => set.has(normImportId(s.importId)));
 }
 
 function pad2(n) {
@@ -597,7 +801,7 @@ function renderPnlHeatmapSectionHtml(byDayPnl, trades, year, yearOptions) {
           <div class="flex items-center gap-2 mb-4">
             <label for="pnl-heatmap-year" class="text-xs font-medium text-slate-500 whitespace-nowrap">Year</label>
             <select id="pnl-heatmap-year"
-              class="rounded-lg bg-surface border border-slate-700 px-2.5 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent min-w-[5.5rem] w-full max-w-[9rem]">
+              class="select-flat min-h-[40px] rounded-lg border border-slate-700 bg-surface px-2.5 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent/80 min-w-[5.5rem] w-full max-w-[9rem]">
               ${yearOpts}
             </select>
           </div>
@@ -727,12 +931,16 @@ function tradeRowHtml(t) {
   const hasNote = (meta.notes || "").trim().length > 0;
   const hasShot =
     state.screenshotUrls.has(t.id) || hasScreenshotStored(meta);
+  const hasTags = tradeMetaTagsNormalized(meta).length > 0;
   const { riskVal, totalInner } = tradeRiskDisplayParts(t, meta);
   const noteClass = hasNote
     ? "bg-amber-500/25 text-amber-200 ring-1 ring-amber-500/40"
     : "bg-slate-800 text-slate-600";
   const shotClass = hasShot
     ? "bg-sky-500/25 text-sky-200 ring-1 ring-sky-500/40"
+    : "bg-slate-800 text-slate-600";
+  const tagClass = hasTags
+    ? "bg-violet-500/20 text-violet-200 ring-1 ring-violet-500/35"
     : "bg-slate-800 text-slate-600";
   const shareTitle = `Peak shares: ${t.maxShares} · Round-turn volume: ${t.shareTurnover}`;
   return `
@@ -750,8 +958,9 @@ function tradeRowHtml(t) {
       <td class="px-3 py-2 text-right font-mono ${t.pnl > 0 ? "text-gain" : "text-loss"}">${formatUsd(t.pnl)}</td>
       <td class="px-3 py-2">${t.win ? '<span class="text-gain">Win</span>' : '<span class="text-loss">Loss</span>'}</td>
       <td class="px-2 py-2 no-row-open text-center">
-        <button type="button" class="meta-preview-trigger inline-flex items-center justify-center gap-1.5 min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 px-2 py-2 sm:px-1 sm:py-1 rounded-lg hover:bg-slate-800/80 transition-colors active:bg-slate-800" data-trade-id="${escapeAttr(t.id)}" aria-label="Preview notes and screenshot">
+        <button type="button" class="meta-preview-trigger inline-flex items-center justify-center gap-1 min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 px-2 py-2 sm:px-1 sm:py-1 rounded-lg hover:bg-slate-800/80 transition-colors active:bg-slate-800" data-trade-id="${escapeAttr(t.id)}" aria-label="Preview notes, tags, and screenshot">
           <span class="inline-flex h-7 w-7 sm:h-6 sm:min-w-[1.5rem] items-center justify-center rounded text-[10px] font-semibold ${noteClass}">N</span>
+          <span class="inline-flex h-7 w-7 sm:h-6 sm:min-w-[1.5rem] items-center justify-center rounded text-[10px] font-semibold ${tagClass}">T</span>
           <span class="inline-flex h-7 w-7 sm:h-6 sm:min-w-[1.5rem] items-center justify-center rounded text-[10px] font-semibold ${shotClass}">S</span>
         </button>
       </td>
@@ -766,12 +975,16 @@ function tradeMobileCardHtml(t) {
   const hasNote = (meta.notes || "").trim().length > 0;
   const hasShot =
     state.screenshotUrls.has(t.id) || hasScreenshotStored(meta);
+  const hasTags = tradeMetaTagsNormalized(meta).length > 0;
   const { riskVal, totalInner } = tradeRiskDisplayParts(t, meta);
   const noteClass = hasNote
     ? "bg-amber-500/25 text-amber-200 ring-1 ring-amber-500/40"
     : "bg-slate-800 text-slate-600";
   const shotClass = hasShot
     ? "bg-sky-500/25 text-sky-200 ring-1 ring-sky-500/40"
+    : "bg-slate-800 text-slate-600";
+  const tagClass = hasTags
+    ? "bg-violet-500/20 text-violet-200 ring-1 ring-violet-500/35"
     : "bg-slate-800 text-slate-600";
   const pnlCls = t.pnl > 0 ? "text-gain" : "text-loss";
   return `
@@ -796,8 +1009,9 @@ function tradeMobileCardHtml(t) {
         <span class="text-sm font-mono min-w-[3.5rem] text-right" data-rr="${escapeAttr(t.id)}">${riskRewardCellInnerHtml(t, meta)}</span>
       </div>
       <div class="mt-3 flex items-center justify-between no-row-open">
-        <button type="button" class="meta-preview-trigger inline-flex items-center gap-2 min-h-[44px] px-3 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800/80 active:bg-slate-800 transition-colors" data-trade-id="${escapeAttr(t.id)}" aria-label="Notes and screenshot">
+        <button type="button" class="meta-preview-trigger inline-flex items-center gap-2 min-h-[44px] px-3 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800/80 active:bg-slate-800 transition-colors" data-trade-id="${escapeAttr(t.id)}" aria-label="Notes, tags, and screenshot">
           <span class="inline-flex h-8 w-8 items-center justify-center rounded text-[10px] font-semibold ${noteClass}">N</span>
+          <span class="inline-flex h-8 w-8 items-center justify-center rounded text-[10px] font-semibold ${tagClass}">T</span>
           <span class="inline-flex h-8 w-8 items-center justify-center rounded text-[10px] font-semibold ${shotClass}">S</span>
           <span class="text-xs text-slate-500">Preview</span>
         </button>
@@ -820,11 +1034,13 @@ async function persistRiskFromInput(tradeId, inputEl) {
   inputEl.classList.remove("ring-1", "ring-loss");
   let merged;
   try {
+    const prev = state.tradeMetaById.get(tradeId) || emptyTradeMeta(tradeId);
     merged = await apiUpsertMeta({
       id: tradeId,
-      notes: state.tradeMetaById.get(tradeId)?.notes ?? null,
+      notes: prev.notes ?? null,
       riskPerShare,
-      screenshotUrl: state.tradeMetaById.get(tradeId)?.screenshotUrl ?? null,
+      screenshotUrl: prev.screenshotUrl ?? null,
+      tags: tradeMetaTagsNormalized(prev),
     });
     const existing = state.tradeMetaById.get(tradeId) || emptyTradeMeta(tradeId);
     merged = { ...existing, riskPerShare };
@@ -878,12 +1094,90 @@ function mergeExtracts(parts) {
   return { fills, balancePoints };
 }
 
+/** `id="upload-account-select"` on Import trades only (which account receives the upload). */
+function tradingAccountUploadSelectBlock(labelText) {
+  const uploadOpts =
+    `<option value="">Select an account…</option>` +
+    (state.tradingAccounts || [])
+      .map(
+        (a) =>
+          `<option value="${escapeAttr(a.id)}"${normImportId(a.id) === normImportId(state.uploadAccountId) ? " selected" : ""}>${escapeHtml(a.label)}${a.broker ? ` · ${escapeHtml(brokerDisplayName(a.broker))}` : ""}</option>`,
+      )
+      .join("");
+  return `
+      <div>
+        <label for="upload-account-select" class="block text-xs font-medium text-slate-500 mb-1">${labelText}</label>
+        <select id="upload-account-select"
+          class="select-flat w-full min-h-[44px] rounded-lg border border-slate-700 bg-surface px-3 py-2.5 text-sm text-slate-200 shadow-inner shadow-black/10 focus:outline-none focus:ring-2 focus:ring-accent/80">
+          ${uploadOpts}
+        </select>
+      </div>`;
+}
+
 function accountPageHtml() {
+  const displayOpts =
+    `<option value="">All trading accounts</option>` +
+    (state.tradingAccounts || [])
+      .map(
+        (a) =>
+          `<option value="${escapeAttr(a.id)}"${normImportId(a.id) === normImportId(state.displayAccountId) ? " selected" : ""}>${escapeHtml(a.label)}${a.broker ? ` · ${escapeHtml(brokerDisplayName(a.broker))}` : ""}</option>`,
+      )
+      .join("");
+  const accountRows =
+    (state.tradingAccounts || []).length === 0
+      ? `<p class="text-sm text-slate-500 py-2">No trading accounts yet. Add one below (e.g. &quot;Main taxable&quot;, &quot;IRA&quot; — same broker is fine).</p>`
+      : (state.tradingAccounts || [])
+          .map((a) => {
+            const n = countImportsForTradingAccount(a.id);
+            return `<div class="flex items-start justify-between gap-3 py-3 border-b border-slate-800/80 last:border-0">
+        <div class="min-w-0">
+          <p class="text-sm font-medium text-slate-200">${escapeHtml(a.label)}</p>
+          <p class="text-xs text-slate-500 mt-0.5">${a.broker ? `${escapeHtml(brokerDisplayName(a.broker))} · ` : ""}${n} CSV upload${n === 1 ? "" : "s"}</p>
+        </div>
+        <button type="button" class="shrink-0 text-xs text-loss hover:underline px-2 py-1 rounded disabled:opacity-40 disabled:pointer-events-none" data-delete-trading-account="${escapeAttr(a.id)}"${n > 0 ? " disabled" : ""} title="${n > 0 ? "Delete or reassign imports first" : "Delete this account"}">Delete</button>
+      </div>`;
+          })
+          .join("");
+
   return `
     <section class="max-w-lg space-y-6">
       <div class="rounded-xl border border-slate-800 bg-surface-raised p-5 space-y-4">
         <h2 class="text-sm font-medium text-slate-400">Account</h2>
         <p class="text-sm text-slate-300" id="account-email"></p>
+      </div>
+
+      <div class="rounded-xl border border-slate-800 bg-surface-raised p-5 space-y-4 max-w-xl">
+        <h2 class="text-sm font-medium text-slate-400">Trading accounts</h2>
+        <p class="text-xs text-slate-500 leading-relaxed">
+          A <strong class="text-slate-400">trading account</strong> is your label for a bucket of data (same broker twice = two accounts). <strong class="text-slate-400">Broker</strong> is the platform (metadata). <strong class="text-slate-400">Strategy tags</strong> stay on Import — comma-separated labels per upload (ORB, swing, etc.).
+        </p>
+        <p class="text-[11px] text-slate-600 leading-relaxed">
+          If saving accounts fails, run <code class="text-slate-400">supabase/trading_accounts.sql</code> in the Supabase SQL editor once.
+        </p>
+        <div>${accountRows}</div>
+        <div class="pt-2 border-t border-slate-800 space-y-3">
+          <p class="text-xs font-medium text-slate-500 uppercase tracking-wide">Add account</p>
+          <input type="text" id="new-trading-account-label" placeholder="e.g. Main taxable, IRA 2024"
+            class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent" />
+          <div>
+            <label class="block text-xs font-medium text-slate-500 mb-1">Broker (platform)</label>
+            ${brokerPlatformSelectHtml("new-trading-account-broker", "Schwab")}
+          </div>
+          <button type="button" id="add-trading-account-btn"
+            class="w-full py-2 rounded-lg bg-accent/15 text-accent text-sm font-medium border border-accent/30 hover:bg-accent/25">
+            Add trading account
+          </button>
+        </div>
+        <div class="pt-4 border-t border-slate-800 space-y-4">
+          <div>
+            <label for="display-account-select" class="block text-xs font-medium text-slate-500 mb-1">Dashboard &amp; calendar show</label>
+            <select id="display-account-select"
+              class="select-flat w-full min-h-[44px] rounded-lg border border-slate-700 bg-surface px-3 py-2.5 text-sm text-slate-200 shadow-inner shadow-black/10 focus:outline-none focus:ring-2 focus:ring-accent/80">
+              ${displayOpts}
+            </select>
+            <p class="text-[11px] text-slate-600 mt-1.5">Pick one account to focus charts, or all accounts. You can change this from the dashboard too.</p>
+          </div>
+        </div>
       </div>
 
       <div class="rounded-xl border border-slate-800 bg-surface-raised p-5 space-y-4">
@@ -904,8 +1198,9 @@ function accountPageHtml() {
         <div class="flex items-center justify-between">
           <div>
             <p class="text-sm text-slate-300">Delete all trades</p>
-            <p class="text-xs text-slate-500">Removes trades, notes/meta and balance. Cannot be undone.</p>
-          </div>
+            <p class="text-xs text-slate-500">Removes trades, eta, balance, import history, and trading accounts. Cannot be undone.</p>
+
+            </div>
           <button type="button" id="delete-trades-btn"
             class="px-4 py-2 rounded-lg bg-loss/15 text-loss text-sm border border-loss/30 hover:bg-loss/25 transition-colors">
             Delete all
@@ -927,6 +1222,7 @@ function accountPageHtml() {
 }
 
 function tradeImportPageHtml() {
+  const hasAccounts = (state.tradingAccounts || []).length > 0;
   return `
     <section class="rounded-xl border border-slate-800 bg-surface-raised p-5 max-w-xl space-y-4">
       <h2 class="text-sm font-medium text-slate-400">Import trades</h2>
@@ -934,26 +1230,21 @@ function tradeImportPageHtml() {
         Pick one or more Schwab cash journal CSVs.
       </p>
 
+      ${
+        hasAccounts
+          ? `${tradingAccountUploadSelectBlock("Trading account")}
       <div>
-        <label class="block text-xs font-medium text-slate-500 mb-1">Broker</label>
-        <select id="import-broker"
-          class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent">
-          <option value="Schwab">Schwab</option>
-          <option value="ToS">ThinkOrSwim</option>
-          <option value="Webull">Webull</option>
-          <option value="Other">Other</option>
-        </select>
-      </div>
-
-      <div>
-        <label class="block text-xs font-medium text-slate-500 mb-1">Tags (comma separated)</label>
+        <label for="import-tags" class="block text-xs font-medium text-slate-500 mb-1">Filter tags (comma separated, optional)</label>
         <input type="text" id="import-tags" placeholder="e.g. ORB, momentum"
           class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent" />
-      </div>
+      </div>`
+          : `<p class="text-sm text-amber-200/90">Add a trading account on the <strong class="text-slate-300">Account</strong> page first, then return here.</p>`
+      }
 
       <input type="file" accept=".csv,text/csv" multiple class="hidden" id="file-input" />
       <button type="button" id="import-csv-trigger"
-        class="inline-flex items-center justify-center min-h-[44px] px-4 py-2 rounded-lg bg-accent/15 text-accent text-sm font-medium hover:bg-accent/25 transition-colors border border-accent/30">
+        class="inline-flex items-center justify-center min-h-[44px] px-4 py-2 rounded-lg bg-accent/15 text-accent text-sm font-medium hover:bg-accent/25 transition-colors border border-accent/30${hasAccounts ? "" : " opacity-40 pointer-events-none"}"
+        ${hasAccounts ? "" : " disabled"}>
         Choose CSV file(s)
       </button>
     </section>
@@ -972,69 +1263,101 @@ function render() {
   /** Equity curve, statistics (KPIs + sparkline), weekday chart — not on Account / Import. */
   const showChartsRow = onDashboard || onCalendar;
 
-  const tagOptions = uniqueSortedTagsFromImports(state.imports);
-  if (state.dashboardTagFilter && !tagOptions.includes(state.dashboardTagFilter)) {
-    state.dashboardTagFilter = "";
-  }
-
-  const wantTag = (state.dashboardTagFilter || "").trim();
-  const tradesLinked = state.trades.some((t) => normImportId(t.importId) !== "");
-  const tradesView = filteredTradesByTag(
+  const importsScope = importsInDisplayScope(
+    state.imports,
+    state.displayAccountId,
+  );
+  const baseTradesForTags = filteredTradesByAccount(
     state.trades,
     state.imports,
-    state.dashboardTagFilter,
+    state.displayAccountId,
   );
+  const tagOptions = mergedDashboardTagOptions(
+    importsScope,
+    baseTradesForTags,
+  );
+  const tagLcToCanon = new Map(
+    tagOptions.map((t) => [String(t).trim().toLowerCase(), String(t).trim()]),
+  );
+  state.dashboardTagFilters = [
+    ...new Set(
+      (state.dashboardTagFilters || [])
+        .map((t) => String(t).trim())
+        .filter(Boolean)
+        .map((t) => tagLcToCanon.get(t.toLowerCase()) || t),
+    ),
+  ];
+  persistDashboardTagFilters();
+
+  const { baseTrades, tradesView } = dashboardScope();
+
+  const wantTags = state.dashboardTagFilters.length > 0;
+  const tradesLinked = baseTrades.some((t) => normImportId(t.importId) !== "");
   const tagWarnNoLinks = Boolean(
-    wantTag && state.trades.length > 0 && !tradesLinked,
+    wantTags && baseTrades.length > 0 && !tradesLinked,
   );
   const tagWarnNoMatches = Boolean(
-    wantTag && tradesLinked && tradesView.length === 0 && state.trades.length > 0,
+    wantTags && tradesView.length === 0 && baseTrades.length > 0,
   );
   const m = computeMetrics(tradesView);
   const trades = tradesView;
 
+  const dispAcc = tradingAccountById(state.displayAccountId);
   const filesLabelExtra =
-    (state.dashboardTagFilter || "").trim() !== ""
-      ? ` · tag: ${state.dashboardTagFilter}`
-      : "";
+    (state.dashboardTagFilters.length > 0
+      ? ` · tags: ${state.dashboardTagFilters.map(escapeHtml).join(", ")}`
+      : "") +
+    (dispAcc
+      ? ` · trading account: ${dispAcc.label}${dispAcc.broker ? ` (${brokerDisplayName(dispAcc.broker)})` : ""}`
+      : "");
+
+  const displayAccountOpts =
+    `<option value="">All trading accounts</option>` +
+    (state.tradingAccounts || [])
+      .map(
+        (a) =>
+          `<option value="${escapeAttr(a.id)}"${normImportId(a.id) === normImportId(state.displayAccountId) ? " selected" : ""}>${escapeHtml(a.label)}${a.broker ? ` · ${escapeHtml(brokerDisplayName(a.broker))}` : ""}</option>`,
+      )
+      .join("");
 
   const showTagFilterUi =
     showChartsRow &&
     (state.trades.length > 0 || state.imports.length > 0);
-  const tagFilterHint =
-    tagOptions.length > 0
-      ? "Stats, equity curve, weekday chart, P&amp;L heatmap, and calendar use only trades from imports that include the tag you pick."
-      : state.imports.length === 0
-        ? "Tags are stored on each upload from the Import trades page. If this list stays empty, reload after saving a CSV there (with optional Tags filled in)."
-        : "No tags on your imports yet. Open Import trades, type tags (comma-separated) next to Tags, then upload your CSV so filters can use them.";
-  const tagFilterWarnHtml = tagWarnNoLinks
-    ? `<div class="mb-3 rounded-lg border border-amber-500/45 bg-amber-950/55 px-3 py-2.5 text-xs text-amber-100 leading-relaxed">
-        Your saved <strong>round trips</strong> are missing <span class="font-mono text-amber-200/90">import_id</span>, so they cannot be matched to an import’s tags. Tag filtering is disabled until you <strong>re-upload</strong> those CSVs from <strong>Import trades</strong> (each run links trades to that import).
+  const tagFilterWarnHtml = tagWarnNoMatches
+    ? `<div class="mb-3 rounded-lg border border-slate-600 bg-slate-800/90 px-3 py-2.5 text-xs text-slate-300 leading-relaxed">
+        No trades match <strong>all</strong> of these tags (each tag must appear on the trade’s CSV import <strong>or</strong> on the trade itself): <strong>${state.dashboardTagFilters.map(escapeHtml).join(", ")}</strong>. Adjust filters or clear chips.
       </div>`
-    : tagWarnNoMatches
-      ? `<div class="mb-3 rounded-lg border border-slate-600 bg-slate-800/90 px-3 py-2.5 text-xs text-slate-300 leading-relaxed">
-        No trades reference an import tagged <strong>${escapeHtml(state.dashboardTagFilter)}</strong>. Pick another tag or <strong>All tags</strong>.
+    : tagWarnNoLinks
+      ? `<div class="mb-3 rounded-lg border border-amber-500/45 bg-amber-950/55 px-3 py-2.5 text-xs text-amber-100 leading-relaxed">
+        Your saved <strong>round trips</strong> are missing <span class="font-mono text-amber-200/90">import_id</span>, so <strong>CSV import tags</strong> cannot match them until you <strong>re-upload</strong> from <strong>Import trades</strong>. You can still filter using <strong>per-trade tags</strong> (open a trade → Tags field → Save).
       </div>`
       : "";
 
   const tagFilterBarHtml = showTagFilterUi
-    ? `<section class="rounded-xl border border-accent/25 bg-accent/5 px-4 py-4 mb-6 shadow-sm" aria-labelledby="dashboard-tag-filter-heading">
-        <h3 id="dashboard-tag-filter-heading" class="text-sm font-semibold text-slate-200 mb-3">Filter by import tag</h3>
+    ? `<section class="rounded-xl border border-slate-700/80 bg-gradient-to-b from-surface-raised to-surface-overlay/40 px-4 py-4 sm:px-5 sm:py-4 mb-6 shadow-lg shadow-black/30 ring-1 ring-slate-800/80" aria-labelledby="dashboard-scope-heading">
+        <div class="mb-3">
+          <h3 id="dashboard-scope-heading" class="text-sm font-semibold tracking-tight text-white">Dashboard &amp; calendar scope</h3>
+        </div>
         ${tagFilterWarnHtml}
-        <div class="flex flex-col lg:flex-row lg:items-end gap-4">
-          <div class="flex flex-col gap-1.5 shrink-0">
-            <label for="dashboard-tag-filter" class="text-xs font-medium text-slate-400">Import tag</label>
-            <select id="dashboard-tag-filter" class="rounded-lg bg-surface border border-slate-600 px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-accent min-h-[44px] w-full sm:min-w-[12rem] sm:max-w-[20rem]">
-              <option value="">All tags</option>
-              ${tagOptions
-                .map(
-                  (t) =>
-                    `<option value="${escapeAttr(t)}"${t === state.dashboardTagFilter ? " selected" : ""}>${escapeHtml(t)}</option>`,
-                )
-                .join("")}
+        <div class="flex flex-col gap-3 md:flex-row md:items-stretch md:gap-4">
+          <div class="flex shrink-0 flex-col gap-1.5 md:w-[min(100%,15rem)] lg:w-[17rem]">
+            <label for="dashboard-display-account" class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Trading account</label>
+            <select id="dashboard-display-account" class="select-flat h-11 w-full rounded-lg border border-slate-600/90 bg-surface px-3 py-0 text-sm leading-normal text-slate-100 shadow-inner shadow-black/20 focus:outline-none focus:ring-2 focus:ring-accent/80 focus:border-accent/50">
+              ${displayAccountOpts}
             </select>
           </div>
-          <p class="text-xs text-slate-500 leading-relaxed min-w-0 flex-1">${tagFilterHint}</p>
+          <div class="flex min-w-0 flex-1 flex-col gap-1.5">
+            <label for="dashboard-tag-input" class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Filter tags</label>
+            <div class="flex min-h-11 min-w-0 flex-wrap items-center gap-2 rounded-lg border border-slate-600/90 bg-slate-950/40 px-2 shadow-inner shadow-black/20">
+              <div class="relative flex h-11 min-w-[10rem] flex-1 items-stretch sm:max-w-[13rem] sm:flex-none sm:w-[13rem]">
+                <input type="text" id="dashboard-tag-input" autocomplete="off" spellcheck="false" placeholder="Search tags…"
+                  class="h-full min-h-0 w-full border-0 bg-transparent px-2.5 text-sm leading-normal text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-0" />
+                <div id="dashboard-tag-suggestions" class="absolute left-0 right-0 top-full z-[80] mt-1 max-h-52 overflow-y-auto rounded-lg border border-slate-600/90 bg-slate-950 py-1 shadow-xl shadow-black/40 hidden" role="listbox" aria-label="Tag suggestions"></div>
+              </div>
+              <div class="hidden h-7 w-px shrink-0 self-center bg-slate-600/50 sm:block" aria-hidden="true"></div>
+              <div id="dashboard-tag-chips" class="flex min-h-0 min-w-0 flex-1 flex-wrap items-center justify-end gap-1.5 py-0.5 pl-1 sm:pl-2"></div>
+            </div>
+          </div>
         </div>
       </section>`
     : "";
@@ -1249,6 +1572,12 @@ function render() {
             <textarea id="modal-notes" rows="4" class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent" placeholder="Setup, mistakes, context…"></textarea>
           </div>
           <div>
+            <label class="block text-xs font-medium text-slate-500 mb-1">Tags (comma-separated)</label>
+            <input type="text" id="modal-trade-tags" autocomplete="off" spellcheck="false" placeholder="e.g. first touch, gap fill"
+              class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-accent" />
+            <p class="text-[11px] text-slate-600 mt-1">Each tag is matched on the trade’s import <strong class="text-slate-500">or</strong> on this trade. Dashboard filters use <strong class="text-slate-500">every</strong> selected tag together (AND).</p>
+          </div>
+          <div>
             <label class="block text-xs font-medium text-slate-500 mb-1">Screenshot</label>
             <input type="file" accept="image/*" id="modal-shot" class="text-sm text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-surface-overlay file:text-slate-200" />
             <p class="text-[11px] text-slate-600 mt-1">Choose an image, then press <span class="text-slate-400">Save</span> at the bottom.</p>
@@ -1266,6 +1595,10 @@ function render() {
   bind();
   paintCharts();
   paintCalendar();
+  queueMicrotask(() => {
+    renderDashboardTagChipsDom();
+    hideDashboardTagSuggestions();
+  });
 }
 
 
@@ -1299,6 +1632,206 @@ function escapeHtml(s) {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
+}
+
+function hideDashboardTagSuggestions() {
+  clearTimeout(dashboardTagBlurHideTimer);
+  dashboardTagBlurHideTimer = null;
+  const box = $("#dashboard-tag-suggestions");
+  if (box) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+  }
+  dashboardTagSuggestHighlight = -1;
+}
+
+function scheduleHideDashboardTagSuggestions() {
+  clearTimeout(dashboardTagBlurHideTimer);
+  dashboardTagBlurHideTimer = window.setTimeout(() => {
+    dashboardTagBlurHideTimer = null;
+    hideDashboardTagSuggestions();
+  }, 200);
+}
+
+function cancelHideDashboardTagSuggestions() {
+  clearTimeout(dashboardTagBlurHideTimer);
+  dashboardTagBlurHideTimer = null;
+}
+
+function dashboardTagPickerPool() {
+  const chosen = new Set(
+    (state.dashboardTagFilters || []).map((t) => String(t).trim().toLowerCase()),
+  );
+  const all = mergedDashboardTagOptions(
+    importsInDisplayScope(state.imports, state.displayAccountId),
+    filteredTradesByAccount(
+      state.trades,
+      state.imports,
+      state.displayAccountId,
+    ),
+  );
+  return all.filter((t) => !chosen.has(String(t).trim().toLowerCase()));
+}
+
+function computeDashboardTagSuggestionRows() {
+  const input = $("#dashboard-tag-input");
+  const q = input ? String(input.value || "").trim() : "";
+  const pool = dashboardTagPickerPool();
+  if (!pool.length) return [];
+  if (!q) return pool.slice(0, 25);
+  const fuse = new Fuse(
+    pool.map((label) => ({ label: String(label) })),
+    { keys: ["label"], threshold: 0.45, ignoreLocation: true },
+  );
+  return fuse.search(q).slice(0, 25).map((r) => r.item.label);
+}
+
+function updateDashboardTagSuggestions(options = {}) {
+  const resetHighlight = options.resetHighlight !== false;
+  if (resetHighlight) dashboardTagSuggestHighlight = -1;
+  const input = $("#dashboard-tag-input");
+  const box = $("#dashboard-tag-suggestions");
+  if (!input || !box) return;
+
+  const rows = computeDashboardTagSuggestionRows();
+  const q = String(input.value || "").trim();
+  if (!rows.length) {
+    if (q && dashboardTagPickerPool().length) {
+      box.innerHTML = `<div class="px-3 py-2.5 text-xs text-slate-500 italic">No matching tags</div>`;
+      box.classList.remove("hidden");
+    } else {
+      box.classList.add("hidden");
+      box.innerHTML = "";
+    }
+    return;
+  }
+
+  if (dashboardTagSuggestHighlight >= rows.length) {
+    dashboardTagSuggestHighlight = rows.length - 1;
+  }
+  if (dashboardTagSuggestHighlight < -1) {
+    dashboardTagSuggestHighlight = -1;
+  }
+
+  box.innerHTML = rows
+    .map(
+      (label, i) =>
+        `<button type="button" role="option" data-dashboard-tag-suggest="${escapeAttr(label)}" class="dashboard-tag-suggest-item w-full text-left px-3 py-2 text-sm transition-colors hover:bg-slate-800/90 ${i === dashboardTagSuggestHighlight ? "bg-accent/15 text-white" : "text-slate-200"}">${escapeHtml(label)}</button>`,
+    )
+    .join("");
+  box.classList.remove("hidden");
+}
+
+function renderDashboardTagChipsDom() {
+  const wrap = $("#dashboard-tag-chips");
+  if (!wrap) return;
+  const tags = state.dashboardTagFilters || [];
+  wrap.innerHTML = tags
+    .map(
+      (t) =>
+        `<span class="inline-flex items-center gap-1 rounded-full border border-accent/25 bg-accent/10 pl-2.5 pr-1 py-0.5 text-xs font-medium text-slate-100 max-w-full ring-1 ring-slate-700/40">
+          <span class="truncate max-w-[14rem]">${escapeHtml(t)}</span>
+          <button type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-slate-400 hover:bg-slate-800 hover:text-white transition-colors" data-dashboard-tag-remove="${escapeAttr(t)}" aria-label="Remove tag">×</button>
+        </span>`,
+    )
+    .join("");
+}
+
+function addDashboardTagFilter(raw) {
+  const t = String(raw || "").trim();
+  if (!t) return false;
+  const opts = mergedDashboardTagOptions(
+    importsInDisplayScope(state.imports, state.displayAccountId),
+    filteredTradesByAccount(
+      state.trades,
+      state.imports,
+      state.displayAccountId,
+    ),
+  );
+  const lc = t.toLowerCase();
+  const canon =
+    new Map(
+      opts.map((x) => [String(x).trim().toLowerCase(), String(x).trim()]),
+    ).get(lc) || t;
+  const cur = new Set(
+    (state.dashboardTagFilters || []).map((x) => String(x).trim().toLowerCase()),
+  );
+  if (cur.has(canon.toLowerCase())) return false;
+  state.dashboardTagFilters = [...(state.dashboardTagFilters || []), canon];
+  persistDashboardTagFilters();
+  return true;
+}
+
+function onDashboardTagInputKeydown(e) {
+  if (!(e.target instanceof HTMLInputElement)) return;
+  if (e.target.id !== "dashboard-tag-input") return;
+
+  if (e.key === "Escape") {
+    e.preventDefault();
+    hideDashboardTagSuggestions();
+    return;
+  }
+
+  if (e.key === ",") {
+    e.preventDefault();
+    const parts = e.target.value.split(",");
+    const head = parts[0].trim();
+    const tail = parts.slice(1).join(",").trim();
+    if (addDashboardTagFilter(head)) {
+      e.target.value = tail;
+      hideDashboardTagSuggestions();
+      render();
+    }
+    return;
+  }
+
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    const rows = computeDashboardTagSuggestionRows();
+    if (!rows.length) return;
+    dashboardTagSuggestHighlight = Math.min(
+      rows.length - 1,
+      dashboardTagSuggestHighlight + 1,
+    );
+    updateDashboardTagSuggestions({ resetHighlight: false });
+    return;
+  }
+
+  if (e.key === "ArrowUp") {
+    e.preventDefault();
+    const rows = computeDashboardTagSuggestionRows();
+    if (!rows.length) return;
+    dashboardTagSuggestHighlight = Math.max(-1, dashboardTagSuggestHighlight - 1);
+    updateDashboardTagSuggestions({ resetHighlight: false });
+    return;
+  }
+
+  if (e.key === "Enter") {
+    e.preventDefault();
+    const rows = computeDashboardTagSuggestionRows();
+    let pick =
+      dashboardTagSuggestHighlight >= 0 &&
+      dashboardTagSuggestHighlight < rows.length
+        ? rows[dashboardTagSuggestHighlight]
+        : "";
+    const typed = String(e.target.value || "").trim();
+    if (!pick && typed) {
+      if (addDashboardTagFilter(typed)) {
+        e.target.value = "";
+        hideDashboardTagSuggestions();
+        render();
+        return;
+      }
+      pick = rows[0] || "";
+    } else if (!pick) {
+      pick = typed;
+    }
+    if (pick && addDashboardTagFilter(pick)) {
+      e.target.value = "";
+      hideDashboardTagSuggestions();
+      render();
+    }
+  }
 }
 
 function tradeMeta(id) {
@@ -1352,6 +1885,7 @@ async function hydrateTradeMeta() {
         riskPerShare: r.risk_per_share ?? null,
         screenshotUrl: r.screenshot_url ?? null,
         hasScreenshot: !!r.screenshot_url,
+        tags: tradeMetaTagsNormalized({ tags: r.tags }),
       };
       state.tradeMetaById.set(id, m);
       if (r.screenshot_url) {
@@ -1424,15 +1958,19 @@ function showMetaPopover(tradeId, anchor) {
   const meta = tradeMeta(tradeId);
   const note = (meta.notes || "").trim();
   const shotUrl = state.screenshotUrls.get(tradeId) || null;
+  const ttags = tradeMetaTagsNormalized(meta);
   let inner = `<div class="popover-inner rounded-lg border border-slate-600 bg-slate-950 shadow-2xl p-3 w-[min(280px,calc(100vw-16px))] max-h-[min(28rem,calc(100svh-24px))] overflow-y-auto text-xs text-slate-200 space-y-2 pointer-events-auto">`;
   if (note) {
     inner += `<div class="text-slate-400 text-[10px] font-medium uppercase tracking-wide">Note</div><div class="whitespace-pre-wrap max-h-36 overflow-y-auto text-slate-200 leading-snug">${escapeHtml(note)}</div>`;
   }
+  if (ttags.length) {
+    inner += `<div class="text-slate-400 text-[10px] font-medium uppercase tracking-wide">Tags</div><div class="flex flex-wrap gap-1">${ttags.map((tg) => `<span class="rounded-md border border-slate-600 bg-slate-900/80 px-1.5 py-0.5 text-[11px] text-slate-200">${escapeHtml(tg)}</span>`).join("")}</div>`;
+  }
   if (shotUrl) {
     inner += `<div class="text-slate-400 text-[10px] font-medium uppercase tracking-wide">Screenshot</div><img src="${shotUrl}" alt="" class="max-w-full max-h-44 object-contain rounded border border-slate-700 bg-black/30" />`;
   }
-  if (!note && !shotUrl) {
-    inner += `<p class="text-slate-500 text-center py-2">No note or screenshot yet.</p>`;
+  if (!note && !shotUrl && !ttags.length) {
+    inner += `<p class="text-slate-500 text-center py-2">No note, tags, or screenshot yet.</p>`;
   }
   inner += `</div>`;
   pop.innerHTML = inner;
@@ -1566,11 +2104,6 @@ function bind() {
     }
   });
 
-  $("#dashboard-tag-filter")?.addEventListener("change", (e) => {
-    state.dashboardTagFilter = e.target.value || "";
-    render();
-  });
-
   $("#import-csv-trigger")?.addEventListener("click", () => {
     $("#file-input")?.click();
   });
@@ -1580,14 +2113,21 @@ function bind() {
     const files = input.files;
     if (!files?.length) return;
 
-    const broker = $("#import-broker")?.value || "Unknown";
+    const uploadId = (state.uploadAccountId || "").trim();
+    if (!uploadId) {
+      alert("Pick a trading account first (dropdown on this page).");
+      input.value = "";
+      return;
+    }
+    const accRow = tradingAccountById(uploadId);
+    const broker = (accRow?.broker || "Other").trim() || "Other";
     const tagsRaw = $("#import-tags")?.value || "";
-    const tags = tagsRaw.split(",").map(t => t.trim()).filter(Boolean);
+    const tags = tagsRaw.split(",").map((t) => t.trim()).filter(Boolean);
     const filename = [...files].map(f => f.name).join(", ");
 
     let importRecord;
     try {
-        importRecord = await apiCreateImport(broker, tags, filename);
+        importRecord = await apiCreateImport(broker, tags, filename, uploadId);
     } catch (err) {
         alert(`Failed to create import: ${err.message}`);
         input.value = "";
@@ -1663,6 +2203,12 @@ function bind() {
     } catch (e) {
       console.error("Failed to refresh imports:", e);
     }
+    try {
+      state.tradingAccounts = await apiGetAccounts();
+    } catch (e) {
+      console.error("Failed to refresh trading accounts:", e);
+    }
+    syncTradingAccountPickerState();
     // Keep tags visible: merge create response + form tags if GET omits or shapes tags oddly.
     if (importRecord.id && tags.length) {
       const fromCreate = importTagsAsArray(importRecord.tags);
@@ -1674,6 +2220,7 @@ function bind() {
           tags: mergedTags,
           broker,
           filename,
+          account_id: importRecord.account_id ?? uploadId,
         });
       } else {
         const row = state.imports[idx];
@@ -1771,6 +2318,52 @@ function bind() {
     });
   }
 
+  const tagInput = $("#dashboard-tag-input");
+  if (tagInput) {
+    tagInput.addEventListener("focusin", () => {
+      cancelHideDashboardTagSuggestions();
+      updateDashboardTagSuggestions();
+    });
+    tagInput.addEventListener("input", () => {
+      updateDashboardTagSuggestions();
+    });
+    tagInput.addEventListener("keydown", onDashboardTagInputKeydown);
+    tagInput.addEventListener("focusout", () => {
+      scheduleHideDashboardTagSuggestions();
+    });
+  }
+
+  $("#dashboard-tag-suggestions")?.addEventListener("mousedown", (e) => {
+    if (e.target.closest("[data-dashboard-tag-suggest]")) e.preventDefault();
+  });
+
+  $("#dashboard-tag-suggestions")?.addEventListener("focusin", () => {
+    cancelHideDashboardTagSuggestions();
+  });
+
+  $("#dashboard-tag-suggestions")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-dashboard-tag-suggest]");
+    if (!btn) return;
+    const label = btn.getAttribute("data-dashboard-tag-suggest") || "";
+    if (!label || !addDashboardTagFilter(label)) return;
+    const inputEl = $("#dashboard-tag-input");
+    if (inputEl) inputEl.value = "";
+    hideDashboardTagSuggestions();
+    render();
+  });
+
+  $("#dashboard-tag-chips")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-dashboard-tag-remove]");
+    if (!btn) return;
+    const rm = btn.getAttribute("data-dashboard-tag-remove");
+    if (rm == null) return;
+    state.dashboardTagFilters = (state.dashboardTagFilters || []).filter(
+      (x) => x !== rm,
+    );
+    persistDashboardTagFilters();
+    render();
+  });
+
   $("#modal-close")?.addEventListener("click", closeModal);
   $("#modal")?.addEventListener("click", (e) => {
     if (e.target.id === "modal") closeModal();
@@ -1819,7 +2412,7 @@ function bind() {
     $("#delete-trades-btn")?.addEventListener("click", async () => {
       if (
         !confirm(
-          "Delete all trades, import history (tags), and balance snapshots? This cannot be undone.",
+          "Delete all trades, import history, balance snapshots, and trading accounts? This cannot be undone.",
         )
       )
         return;
@@ -1829,7 +2422,13 @@ function bind() {
         state.metrics = null;
         state.balanceSnapshots = [];
         state.imports = [];
-        state.dashboardTagFilter = "";
+        state.tradingAccounts = [];
+        state.uploadAccountId = "";
+        state.displayAccountId = "";
+        localStorage.removeItem(LS_UPLOAD_ACCOUNT);
+        localStorage.removeItem(LS_DISPLAY_ACCOUNT);
+        state.dashboardTagFilters = [];
+        persistDashboardTagFilters();
         state.tradeMetaById.clear();
         state.screenshotUrls.clear();
         state.filesLabel = "No files loaded";
@@ -1867,16 +2466,20 @@ function paintCharts() {
 
   const onCalendar = isActivePage(Page.Calendar);
 
-  const tradesView = filteredTradesByTag(
-    state.trades,
+  const { tradesView } = dashboardScope();
+  const importsScope = importsInDisplayScope(
     state.imports,
-    state.dashboardTagFilter,
+    state.displayAccountId,
   );
-  const balFiltered = filteredBalanceSnapshotsByTag(
+  const balScoped = filteredBalanceSnapshotsByAccount(
     state.balanceSnapshots,
     state.imports,
-    state.dashboardTagFilter,
+    state.displayAccountId,
   );
+  const balFiltered =
+    state.dashboardTagFilters.length > 0
+      ? filteredBalanceSnapshotsForTradesSubset(balScoped, tradesView)
+      : balScoped;
   const equityFiltered = buildEquitySeries(balFiltered);
 
   let equitySlice = equityFiltered;
@@ -1996,11 +2599,7 @@ function paintCalendar() {
     year: "numeric",
   });
 
-  const trades = filteredTradesByTag(
-    state.trades,
-    state.imports,
-    state.dashboardTagFilter,
-  );
+  const { tradesView: trades } = dashboardScope();
   const weekRows = getWeekRowsForMonth(y, mo);
   const colTemplate =
     "grid-cols-[repeat(5,minmax(0,1fr))_minmax(9.5rem,1fr)] sm:grid-cols-[repeat(5,minmax(0,1fr))_minmax(12rem,1fr)]";
@@ -2115,6 +2714,10 @@ async function openModal(tradeId) {
   $("#modal-title").textContent = `${t.symbol} · ${t.openSide}`;
   $("#modal-sub").textContent = `${t.id.split("|").slice(0, 2).join(" · ")}`;
   $("#modal-notes").value = meta.notes || "";
+  const mTags = $("#modal-trade-tags");
+  if (mTags) {
+    mTags.value = tradeMetaTagsNormalized(meta).join(", ");
+  }
   const mr = $("#modal-risk");
   if (mr) {
     mr.value =
@@ -2181,13 +2784,26 @@ function clearModalShot() {
   $("#modal-shot").value = "";
 }
 
+function parseCommaSeparatedTags(raw) {
+  return [
+    ...new Set(
+      String(raw || "")
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
 async function saveModal() {
   if (!modalCurrentId) return;
 
   const rawRisk = $("#modal-risk")?.value?.trim() ?? "";
+  const tags = parseCommaSeparatedTags($("#modal-trade-tags")?.value ?? "");
   const patch = {
     id: modalCurrentId,
     notes: $("#modal-notes").value,
+    tags,
   };
   if (rawRisk === "") {
     patch.riskPerShare = null;
@@ -2212,6 +2828,7 @@ async function saveModal() {
       notes: patch.notes,
       riskPerShare: patch.riskPerShare ?? null,
       screenshotUrl,
+      tags: patch.tags,
     });
 
     const updated = {
@@ -2221,6 +2838,7 @@ async function saveModal() {
       riskPerShare: patch.riskPerShare ?? null,
       screenshotUrl,
       hasScreenshot: !!screenshotUrl,
+      tags: patch.tags,
     };
     state.tradeMetaById.set(modalCurrentId, updated);
     if (screenshotUrl) {
@@ -2247,7 +2865,52 @@ async function compressImage(blob, maxWidth = 1280, quality = 0.7) {
 }
 
 /** Sidebar nav: one listener on #app so it survives every `render()` (buttons are recreated each time). */
-document.querySelector("#app")?.addEventListener("click", (event) => {
+document.querySelector("#app")?.addEventListener("click", async (event) => {
+  const delAcc = event.target.closest("[data-delete-trading-account]");
+  if (delAcc) {
+    const id = delAcc.getAttribute("data-delete-trading-account");
+    if (!id) return;
+    if (
+      !confirm(
+        "Delete this trading account? Only allowed when no CSV imports are linked to it.",
+      )
+    ) {
+      return;
+    }
+    try {
+      await apiDeleteTradingAccount(id);
+      state.tradingAccounts = await apiGetAccounts();
+      syncTradingAccountPickerState();
+      render();
+    } catch (err) {
+      alert(err.message);
+    }
+    return;
+  }
+  if (event.target.closest("#add-trading-account-btn")) {
+    const labelIn = $("#new-trading-account-label");
+    const brokerIn = $("#new-trading-account-broker");
+    if (!labelIn || !brokerIn) return;
+    const label = String(labelIn.value || "").trim();
+    if (!label) {
+      alert("Enter an account label (e.g. Main taxable, IRA).");
+      return;
+    }
+    try {
+      const row = await apiCreateTradingAccount(label, brokerIn.value || "");
+      state.tradingAccounts = await apiGetAccounts();
+      syncTradingAccountPickerState();
+      if (row?.id && !state.uploadAccountId) {
+        state.uploadAccountId = String(row.id);
+        localStorage.setItem(LS_UPLOAD_ACCOUNT, state.uploadAccountId);
+      }
+      labelIn.value = "";
+      render();
+    } catch (err) {
+      alert(err.message);
+    }
+    return;
+  }
   const btn = event.target.closest("[data-nav-page]");
   if (!btn) return;
   const page = btn.dataset.navPage;
@@ -2255,6 +2918,30 @@ document.querySelector("#app")?.addEventListener("click", (event) => {
   closeMobileNav();
   state.page = page;
   render();
+});
+
+document.querySelector("#app")?.addEventListener("change", (e) => {
+  const t = e.target;
+  if (!(t instanceof HTMLSelectElement)) return;
+  if (t.id === "dashboard-display-account" || t.id === "display-account-select") {
+    state.displayAccountId = (t.value || "").trim();
+    if (state.displayAccountId) {
+      localStorage.setItem(LS_DISPLAY_ACCOUNT, state.displayAccountId);
+    } else {
+      localStorage.removeItem(LS_DISPLAY_ACCOUNT);
+    }
+    render();
+    return;
+  }
+  if (t.id === "upload-account-select") {
+    state.uploadAccountId = (t.value || "").trim();
+    if (state.uploadAccountId) {
+      localStorage.setItem(LS_UPLOAD_ACCOUNT, state.uploadAccountId);
+    } else {
+      localStorage.removeItem(LS_UPLOAD_ACCOUNT);
+    }
+    render();
+  }
 });
 
 document.addEventListener("click", onGlobalClickForTradeMenu);
@@ -2288,6 +2975,25 @@ if (!isPasswordRecovery) {
           console.error("Failed to load imports:", e);
         }
         state.imports = Array.isArray(importRows) ? importRows : [];
+        try {
+          state.tradingAccounts = await apiGetAccounts();
+        } catch (e) {
+          console.error("Failed to load trading accounts:", e);
+          state.tradingAccounts = [];
+        }
+        const hasOrphanImports = state.imports.some(
+          (im) => im.account_id == null || im.account_id === "",
+        );
+        if (hasOrphanImports && state.imports.length) {
+          try {
+            await apiBackfillTradingAccounts();
+            state.imports = await apiGetImports();
+            state.tradingAccounts = await apiGetAccounts();
+          } catch (e) {
+            console.warn("Trading account backfill skipped or failed:", e);
+          }
+        }
+        syncTradingAccountPickerState();
         if (rows.length) {
           state.trades = rows.map((r) => ({
             id: r.id,

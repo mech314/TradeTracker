@@ -35,6 +35,8 @@ export function emptyTradeMeta(id) {
     hasScreenshot: false,
     updatedAt: null,
     screenshot: null,
+    /** Manual labels for this trade; dashboard filter matches import tags OR any of these. */
+    tags: [],
   };
 }
 

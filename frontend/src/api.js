@@ -49,6 +49,7 @@ export async function apiUpsertMeta(record) {
             notes: record.notes ?? null,
             risk_per_share: record.riskPerShare ?? null,
             screenshot_url: record.screenshotUrl ?? null,
+            tags: Array.isArray(record.tags) ? record.tags : [],
         })
     });
     if (!res.ok) throw new Error("Failed to save meta");
@@ -164,10 +165,53 @@ export async function apiGetBalance() {
     return Array.isArray(data) ? data : [];
 }
 
-export async function apiCreateImport(broker, tags, filename) {
+export async function apiGetAccounts() {
+    const res = await fetchWithRefresh(`${API}/api/accounts`);
+    if (!res.ok) throw new Error("Failed to fetch trading accounts");
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+}
+
+export async function apiCreateTradingAccount(label, broker) {
+    const res = await fetchWithRefresh(`${API}/api/accounts`, {
+        method: "POST",
+        body: JSON.stringify({ label, broker: broker || null }),
+    });
+    if (!res.ok) throw new Error("Failed to create trading account");
+    const data = await res.json();
+    if (Array.isArray(data)) return data[0] ?? null;
+    return data ?? null;
+}
+
+export async function apiDeleteTradingAccount(accountId) {
+    const res = await fetchWithRefresh(
+        `${API}/api/accounts/${encodeURIComponent(accountId)}`,
+        { method: "DELETE" },
+    );
+    if (!res.ok) throw new Error("Failed to delete trading account");
+    return res.json();
+}
+
+/** Link orphan imports (no account_id) to per-broker legacy trading accounts. */
+export async function apiBackfillTradingAccounts() {
+    const res = await fetchWithRefresh(`${API}/api/accounts/backfill`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+    });
+    if (!res.ok) throw new Error("Failed to backfill trading accounts");
+    return res.json();
+}
+
+export async function apiCreateImport(broker, tags, filename, accountId = null) {
     const res = await fetchWithRefresh(`${API}/api/imports`, {
         method: "POST",
-        body: JSON.stringify({ broker, tags, filename })
+        body: JSON.stringify({
+            broker,
+            tags,
+            filename,
+            account_id: accountId ?? null,
+        }),
     });
     if (!res.ok) throw new Error("Failed to create import");
     const data = await res.json();
