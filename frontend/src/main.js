@@ -1664,13 +1664,18 @@ function render() {
             <input type="file" accept="image/*" id="modal-shot" class="text-sm text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-surface-overlay file:text-slate-200" />
             <p class="text-[11px] text-slate-600 mt-1">Choose an image, then press <span class="text-slate-400">Save</span> at the bottom.</p>
             <div id="modal-preview" class="mt-3 rounded-lg overflow-hidden border border-slate-800 hidden">
-              <img alt="" class="w-full max-h-64 object-contain bg-black/40" id="modal-img" />
+              <img alt="" title="Click to enlarge" class="w-full max-h-64 object-contain bg-black/40 cursor-zoom-in" id="modal-img" />
             </div>
             <button type="button" id="modal-clear-shot" class="mt-2 text-xs text-slate-500 hover:text-loss hidden">Remove image</button>
           </div>
           <button type="button" id="modal-save" class="w-full min-h-[48px] py-3 sm:py-2.5 rounded-lg bg-accent text-white text-sm font-medium hover:bg-blue-500 transition-colors">Save</button>
         </div>
       </div>
+    </div>
+
+    <div id="screenshot-lightbox" class="fixed inset-0 z-[85] hidden items-center justify-center bg-black/92 p-3 sm:p-6" role="dialog" aria-modal="true" aria-label="Enlarged screenshot" aria-hidden="true">
+      <button type="button" id="screenshot-lightbox-close" class="absolute top-3 right-3 sm:top-4 sm:right-4 z-10 min-h-[44px] min-w-[44px] rounded-lg text-3xl leading-none text-slate-400 hover:text-white hover:bg-white/10 transition-colors" aria-label="Close enlarged view">&times;</button>
+      <img id="screenshot-lightbox-img" alt="" class="max-h-[min(92vh,92dvh)] max-w-full w-auto h-auto object-contain shadow-2xl select-none" draggable="false" />
     </div>
   `;
 
@@ -2925,10 +2930,37 @@ async function openModal(tradeId) {
 }
 
 function closeModal() {
+  closeScreenshotLightbox();
   $("#modal").classList.add("hidden");
   $("#modal").classList.remove("flex");
   modalCurrentId = null;
   modalScreenshotDataUrl = null;
+}
+
+function openScreenshotLightbox(src) {
+  if (!src || typeof src !== "string") return;
+  const lb = $("#screenshot-lightbox");
+  const big = $("#screenshot-lightbox-img");
+  if (!lb || !big) return;
+  big.src = src;
+  big.alt = "Enlarged trade screenshot";
+  lb.classList.remove("hidden");
+  lb.classList.add("flex");
+  lb.setAttribute("aria-hidden", "false");
+}
+
+function closeScreenshotLightbox() {
+  const lb = $("#screenshot-lightbox");
+  const big = $("#screenshot-lightbox-img");
+  if (big) {
+    big.removeAttribute("src");
+    big.alt = "";
+  }
+  if (lb) {
+    lb.classList.add("hidden");
+    lb.classList.remove("flex");
+    lb.setAttribute("aria-hidden", "true");
+  }
 }
 
 async function performDeleteTrade(id) {
@@ -2959,6 +2991,7 @@ async function performDeleteTrade(id) {
 }
 
 function clearModalShot() {
+  closeScreenshotLightbox();
   modalScreenshotExplicitlyCleared = true;
   modalScreenshotDataUrl = null;
   $("#modal-img").src = "";
@@ -3159,6 +3192,25 @@ document.querySelector("#app")?.addEventListener("change", (e) => {
 });
 
 document.addEventListener("click", onGlobalClickForTradeMenu);
+document.addEventListener("click", (e) => {
+  const t = e.target;
+  if (t?.id === "modal-img" && t instanceof HTMLImageElement) {
+    const src = t.currentSrc || t.src;
+    if (src) {
+      e.preventDefault();
+      openScreenshotLightbox(src);
+    }
+    return;
+  }
+  if (t?.id === "screenshot-lightbox-close") {
+    closeScreenshotLightbox();
+    return;
+  }
+  const lb = $("#screenshot-lightbox");
+  if (lb && !lb.classList.contains("hidden") && t === lb) {
+    closeScreenshotLightbox();
+  }
+});
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" || e.key === " ") {
     const th = e.target?.closest?.("th[data-trade-sort]");
@@ -3180,6 +3232,12 @@ document.addEventListener("keydown", (e) => {
     }
   }
   if (e.key !== "Escape") return;
+  const shotLb = $("#screenshot-lightbox");
+  if (shotLb && !shotLb.classList.contains("hidden")) {
+    e.preventDefault();
+    closeScreenshotLightbox();
+    return;
+  }
   const menu = $("#trade-row-menu");
   if (menu && !menu.classList.contains("hidden")) {
     closeTradeRowMenu();
