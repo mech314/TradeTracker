@@ -142,6 +142,61 @@ const ALL_PAGE_IDS = Object.freeze(Object.values(Page));
 const LS_UPLOAD_ACCOUNT = "tradetracker_upload_account_id";
 const LS_DISPLAY_ACCOUNT = "tradetracker_display_account_id";
 const LS_DASHBOARD_TAGS = "tradetracker_dashboard_tags";
+const LS_TRADE_TABLE_SORT = "tradetracker_trades_table_sort";
+
+/** Columns that support header / mobile sorting on the calendar trades table. */
+const TRADE_TABLE_SORT_COLUMNS = new Set([
+  "dateKey",
+  "openTs",
+  "closeTs",
+  "symbol",
+  "openSide",
+  "maxShares",
+  "riskPerShare",
+  "totalRisk",
+  "rr",
+  "pnl",
+  "result",
+  "notesMeta",
+]);
+
+function readTradeTableSortFromStorage() {
+  try {
+    const raw = localStorage.getItem(LS_TRADE_TABLE_SORT);
+    if (raw) {
+      const j = JSON.parse(raw);
+      if (
+        j &&
+        typeof j.column === "string" &&
+        TRADE_TABLE_SORT_COLUMNS.has(j.column) &&
+        (j.direction === "asc" || j.direction === "desc")
+      ) {
+        return { column: j.column, direction: j.direction };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return { column: "closeTs", direction: "desc" };
+}
+
+function persistTradeTableSort() {
+  try {
+    localStorage.setItem(
+      LS_TRADE_TABLE_SORT,
+      JSON.stringify(state.tradeTableSort),
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+function defaultTradeSortDirection(column) {
+  if (column === "symbol" || column === "openSide" || column === "notesMeta") {
+    return "asc";
+  }
+  return "desc";
+}
 
 function readDashboardTagFiltersFromStorage() {
   try {
@@ -203,6 +258,8 @@ let state = {
   page: Page.Dashboard,
   /** Calendar year for dashboard P&amp;L heatmap (Mon–Fri). */
   pnlHeatmapYear: new Date().getFullYear(),
+  /** Calendar trades table: column id + asc/desc (persisted). */
+  tradeTableSort: readTradeTableSortFromStorage(),
 };
 
 let metaPopoverHideTimer = null;
@@ -946,7 +1003,8 @@ function tradeRowHtml(t) {
   return `
     <tr class="hover:bg-surface-overlay/60 cursor-pointer transition-colors trade-row group" data-id="${escapeAttr(t.id)}">
       <td class="px-3 py-2 font-mono text-slate-400">${t.dateKey}</td>
-      <td class="px-3 py-2 font-mono text-slate-500 whitespace-nowrap">${formatCloseTime(t.closeTs)}</td>
+      <td class="px-3 py-2 font-mono text-slate-500 whitespace-nowrap">${formatTradeClock(t.openTs)}</td>
+      <td class="px-3 py-2 font-mono text-slate-500 whitespace-nowrap">${formatTradeClock(t.closeTs)}</td>
       <td class="px-3 py-2 font-medium text-white">${t.symbol}</td>
       <td class="px-3 py-2 text-slate-400">${t.openSide}</td>
       <td class="px-3 py-2 text-right font-mono text-slate-300" title="${escapeAttr(shareTitle)}">${t.maxShares}</td>
@@ -992,7 +1050,7 @@ function tradeMobileCardHtml(t) {
       <div class="flex justify-between gap-3 items-start">
         <div class="min-w-0">
           <p class="text-base font-semibold text-white truncate">${escapeHtml(t.symbol)}</p>
-          <p class="text-xs text-slate-500 font-mono mt-0.5">${t.dateKey} · ${formatCloseTime(t.closeTs)}</p>
+          <p class="text-xs text-slate-500 font-mono mt-0.5">${t.dateKey} · open ${formatTradeClock(t.openTs)} · close ${formatTradeClock(t.closeTs)}</p>
           <p class="text-xs text-slate-400 mt-1">${escapeHtml(t.openSide)} · <span class="font-mono text-slate-300">${t.maxShares}</span> sh</p>
         </div>
         <div class="text-right shrink-0">
@@ -1374,17 +1432,19 @@ function render() {
     cal.getMonth(),
   );
   if (dayFilter != null) {
-    calendarTableTrades = calendarTableTrades
-      .filter((t) => canonicalDateKey(t.dateKey) === dayFilter)
-      .sort((a, b) => a.closeTs - b.closeTs);
-  } else {
-    calendarTableTrades = [...calendarTableTrades].sort(
-      (a, b) => b.closeTs - a.closeTs,
+    calendarTableTrades = calendarTableTrades.filter(
+      (t) => canonicalDateKey(t.dateKey) === dayFilter,
     );
   }
+  calendarTableTrades = sortTradesForTable(
+    calendarTableTrades,
+    state.tradeTableSort.column,
+    state.tradeTableSort.direction,
+  );
+  const sortShort = `${state.tradeTableSort.column} ${state.tradeTableSort.direction}`;
   const calendarTableCaption = dayFilter
-    ? `Day: ${dayFilter} · sorted by close time`
-    : cal.toLocaleString(undefined, { month: "long", year: "numeric" });
+    ? `Day: ${dayFilter} · ${calendarTableTrades.length} shown · sort: ${sortShort}`
+    : `${cal.toLocaleString(undefined, { month: "long", year: "numeric" })} · ${calendarTableTrades.length} shown · sort: ${sortShort}`;
 
   const dashboardStatsHtml = `
     <section class="grid sm:grid-cols-2 lg:grid-cols-5 gap-4" id="stat-cards">
@@ -1415,24 +1475,46 @@ function render() {
         <section class="rounded-xl border border-slate-800 bg-surface-raised overflow-hidden">
           <div class="px-4 py-3 border-b border-slate-800 flex flex-wrap justify-between gap-2">
             <h2 class="text-sm font-medium text-slate-400">Trades</h2>
-            <span class="text-xs text-slate-500">${calendarTableCaption} · ${calendarTableTrades.length} shown</span>
+            <span class="text-xs text-slate-500">${calendarTableCaption}</span>
+          </div>
+          <div class="md:hidden flex flex-wrap items-center gap-2 border-b border-slate-800/90 px-3 py-2">
+            <span class="text-xs text-slate-500 shrink-0">Sort</span>
+            <select id="trade-sort-column" class="select-flat min-h-[40px] flex-1 min-w-[8rem] rounded-md border border-slate-700 bg-surface px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent/80">
+              <option value="dateKey"${state.tradeTableSort.column === "dateKey" ? " selected" : ""}>Date</option>
+              <option value="openTs"${state.tradeTableSort.column === "openTs" ? " selected" : ""}>Opened</option>
+              <option value="closeTs"${state.tradeTableSort.column === "closeTs" ? " selected" : ""}>Closed</option>
+              <option value="symbol"${state.tradeTableSort.column === "symbol" ? " selected" : ""}>Symbol</option>
+              <option value="openSide"${state.tradeTableSort.column === "openSide" ? " selected" : ""}>Side</option>
+              <option value="maxShares"${state.tradeTableSort.column === "maxShares" ? " selected" : ""}>Shares</option>
+              <option value="riskPerShare"${state.tradeTableSort.column === "riskPerShare" ? " selected" : ""}>Risk/sh</option>
+              <option value="totalRisk"${state.tradeTableSort.column === "totalRisk" ? " selected" : ""}>Total risk</option>
+              <option value="rr"${state.tradeTableSort.column === "rr" ? " selected" : ""}>R:R</option>
+              <option value="pnl"${state.tradeTableSort.column === "pnl" ? " selected" : ""}>P&amp;L</option>
+              <option value="result"${state.tradeTableSort.column === "result" ? " selected" : ""}>Result</option>
+              <option value="notesMeta"${state.tradeTableSort.column === "notesMeta" ? " selected" : ""}>Notes</option>
+            </select>
+            <select id="trade-sort-direction" class="select-flat min-h-[40px] rounded-md border border-slate-700 bg-surface px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent/80">
+              <option value="asc"${state.tradeTableSort.direction === "asc" ? " selected" : ""}>Asc</option>
+              <option value="desc"${state.tradeTableSort.direction === "desc" ? " selected" : ""}>Desc</option>
+            </select>
           </div>
           <div class="hidden md:block overflow-x-auto touch-pan-x">
-            <table class="w-full text-sm min-w-[1000px]">
+            <table class="w-full text-sm min-w-[1180px]">
               <thead class="text-left text-slate-500 border-b border-slate-800">
                 <tr>
-                  <th class="px-3 py-2 font-medium">Date</th>
-                  <th class="px-3 py-2 font-medium">Closed</th>
-                  <th class="px-3 py-2 font-medium">Symbol</th>
-                  <th class="px-3 py-2 font-medium">Side</th>
-                  <th class="px-3 py-2 font-medium text-right cursor-help" title="Peak shares held during the trade. Tooltip on cell shows round-turn share volume.">Shares</th>
-                  <th class="px-3 py-2 font-medium text-right cursor-help" title="Dollar risk per share (e.g. distance to stop). Total risk = this × peak shares.">Risk/sh $</th>
-                  <th class="px-3 py-2 font-medium text-right cursor-help" title="Risk/sh × peak shares, when risk/sh is set.">Total risk</th>
-                  <th class="px-3 py-2 font-medium text-right cursor-help" title="P&amp;L divided by total risk (1R = amount risked). Shown only when total risk is set.">R:R</th>
-                  <th class="px-3 py-2 font-medium text-right">P&amp;L</th>
-                  <th class="px-3 py-2 font-medium">Result</th>
-                  <th class="px-3 py-2 font-medium text-center cursor-help" title="Hover for note and screenshot preview.">Notes</th>
-                  <th class="px-2 py-2 font-medium text-right w-10"><span class="sr-only">Options</span></th>
+                  ${tradeTableSortableTh("Date", "dateKey")}
+                  ${tradeTableSortableTh("Opened", "openTs", "", "First fill (local wall time)")}
+                  ${tradeTableSortableTh("Closed", "closeTs", "", "Last fill (local wall time)")}
+                  ${tradeTableSortableTh("Symbol", "symbol")}
+                  ${tradeTableSortableTh("Side", "openSide")}
+                  ${tradeTableSortableTh("Shares", "maxShares", "text-right cursor-help", "Peak shares held during the trade. Cell tooltip: round-turn share volume.")}
+                  ${tradeTableSortableTh("Risk/sh $", "riskPerShare", "text-right cursor-help", "Dollar risk per share (e.g. distance to stop). Total risk = this × peak shares.")}
+                  ${tradeTableSortableTh("Total risk", "totalRisk", "text-right cursor-help", "Risk/sh × peak shares, when risk/sh is set.")}
+                  ${tradeTableSortableTh("R:R", "rr", "text-right cursor-help", "P&amp;L divided by total risk (1R = amount risked). Shown only when total risk is set.")}
+                  ${tradeTableSortableTh("P&amp;L", "pnl", "text-right")}
+                  ${tradeTableSortableTh("Result", "result")}
+                  ${tradeTableSortableTh("Notes", "notesMeta", "text-center cursor-help", "Sorts by note text (empty notes sort first in ascending order)")}
+                  <th class="px-2 py-2 font-medium text-right w-10 text-slate-500"><span class="sr-only">Options</span></th>
                 </tr>
               </thead>
               <tbody id="trades-tbody" class="divide-y divide-slate-800/80">
@@ -1618,10 +1700,111 @@ function formatPF(pf) {
   return pf.toFixed(2);
 }
 
-/** Local wall-clock time when the round trip closed (last fill). */
-function formatCloseTime(ts) {
-  const d = new Date(ts);
+/** Local wall-clock time from a Unix ms timestamp (open or close). */
+function formatTradeClock(ts) {
+  if (ts == null || !Number.isFinite(Number(ts))) return "—";
+  const d = new Date(Number(ts));
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+/** @deprecated use formatTradeClock — kept for readability at call sites */
+function formatCloseTime(ts) {
+  return formatTradeClock(ts);
+}
+
+function metaForTradeSort(tradeId) {
+  return state.tradeMetaById.get(tradeId) || emptyTradeMeta(tradeId);
+}
+
+function totalRiskSortValue(t) {
+  const meta = metaForTradeSort(t.id);
+  const rps = meta.riskPerShare;
+  const rpsNum =
+    rps != null && rps !== "" && Number.isFinite(Number(rps))
+      ? Number(rps)
+      : null;
+  if (rpsNum == null || !(t.maxShares > 0)) return null;
+  return rpsNum * t.maxShares;
+}
+
+function compareTradesForTable(a, b, col, dir) {
+  const asc = dir === "asc" ? 1 : -1;
+  const ncmp = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
+  switch (col) {
+    case "dateKey":
+      return (
+        asc *
+        ncmp(
+          canonicalDateKey(a.dateKey),
+          canonicalDateKey(b.dateKey),
+        )
+      );
+    case "openTs":
+      return asc * ncmp(a.openTs ?? 0, b.openTs ?? 0);
+    case "closeTs":
+      return asc * ncmp(a.closeTs ?? 0, b.closeTs ?? 0);
+    case "symbol":
+      return asc * String(a.symbol).localeCompare(String(b.symbol));
+    case "openSide":
+      return asc * String(a.openSide).localeCompare(String(b.openSide));
+    case "maxShares":
+      return asc * ncmp(a.maxShares ?? 0, b.maxShares ?? 0);
+    case "riskPerShare": {
+      const ra = metaForTradeSort(a.id).riskPerShare;
+      const rb = metaForTradeSort(b.id).riskPerShare;
+      const na = Number.isFinite(Number(ra)) ? Number(ra) : null;
+      const nb = Number.isFinite(Number(rb)) ? Number(rb) : null;
+      if (na == null && nb == null) return 0;
+      if (na == null) return 1;
+      if (nb == null) return -1;
+      return asc * ncmp(na, nb);
+    }
+    case "totalRisk": {
+      const va = totalRiskSortValue(a);
+      const vb = totalRiskSortValue(b);
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      return asc * ncmp(va, vb);
+    }
+    case "rr": {
+      const rra = tradeRiskRewardMultiple(a, metaForTradeSort(a.id));
+      const rrb = tradeRiskRewardMultiple(b, metaForTradeSort(b.id));
+      if (rra == null && rrb == null) return 0;
+      if (rra == null) return 1;
+      if (rrb == null) return -1;
+      return asc * ncmp(rra, rrb);
+    }
+    case "pnl":
+      return asc * ncmp(a.pnl ?? 0, b.pnl ?? 0);
+    case "result": {
+      const va = a.win ? 1 : 0;
+      const vb = b.win ? 1 : 0;
+      return dir === "desc" ? vb - va : va - vb;
+    }
+    case "notesMeta": {
+      const sa = (metaForTradeSort(a.id).notes || "").trim().toLowerCase();
+      const sb = (metaForTradeSort(b.id).notes || "").trim().toLowerCase();
+      return asc * sa.localeCompare(sb);
+    }
+    default:
+      return 0;
+  }
+}
+
+function sortTradesForTable(list, column, direction) {
+  const arr = [...(list || [])];
+  arr.sort((a, b) => compareTradesForTable(a, b, column, direction));
+  return arr;
+}
+
+function tradeTableSortableTh(label, colId, extraClass = "", title = "") {
+  const { column, direction } = state.tradeTableSort;
+  const active = column === colId;
+  const arrow = !active ? "" : direction === "asc" ? " ▲" : " ▼";
+  const cls = `px-3 py-2 font-medium ${extraClass} ${active ? "text-slate-300" : "text-slate-500"} cursor-pointer hover:text-slate-300 select-none`;
+  const tit = title ? ` title="${escapeAttr(title)}"` : "";
+  return `<th scope="col"${tit} class="${cls}" data-trade-sort="${escapeAttr(colId)}" tabindex="0">${escapeHtml(label)}${arrow}</th>`;
 }
 
 function escapeAttr(s) {
@@ -2866,6 +3049,22 @@ async function compressImage(blob, maxWidth = 1280, quality = 0.7) {
 
 /** Sidebar nav: one listener on #app so it survives every `render()` (buttons are recreated each time). */
 document.querySelector("#app")?.addEventListener("click", async (event) => {
+  const sortTh = event.target.closest("th[data-trade-sort]");
+  if (sortTh) {
+    const col = sortTh.getAttribute("data-trade-sort");
+    if (col && TRADE_TABLE_SORT_COLUMNS.has(col)) {
+      if (state.tradeTableSort.column === col) {
+        state.tradeTableSort.direction =
+          state.tradeTableSort.direction === "asc" ? "desc" : "asc";
+      } else {
+        state.tradeTableSort.column = col;
+        state.tradeTableSort.direction = defaultTradeSortDirection(col);
+      }
+      persistTradeTableSort();
+      render();
+    }
+    return;
+  }
   const delAcc = event.target.closest("[data-delete-trading-account]");
   if (delAcc) {
     const id = delAcc.getAttribute("data-delete-trading-account");
@@ -2941,11 +3140,45 @@ document.querySelector("#app")?.addEventListener("change", (e) => {
       localStorage.removeItem(LS_UPLOAD_ACCOUNT);
     }
     render();
+    return;
+  }
+  if (t.id === "trade-sort-column") {
+    const col = String(t.value || "").trim();
+    state.tradeTableSort.column = TRADE_TABLE_SORT_COLUMNS.has(col)
+      ? col
+      : "closeTs";
+    persistTradeTableSort();
+    render();
+    return;
+  }
+  if (t.id === "trade-sort-direction") {
+    state.tradeTableSort.direction = t.value === "asc" ? "asc" : "desc";
+    persistTradeTableSort();
+    render();
   }
 });
 
 document.addEventListener("click", onGlobalClickForTradeMenu);
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") {
+    const th = e.target?.closest?.("th[data-trade-sort]");
+    if (th) {
+      e.preventDefault();
+      const col = th.getAttribute("data-trade-sort");
+      if (col && TRADE_TABLE_SORT_COLUMNS.has(col)) {
+        if (state.tradeTableSort.column === col) {
+          state.tradeTableSort.direction =
+            state.tradeTableSort.direction === "asc" ? "desc" : "asc";
+        } else {
+          state.tradeTableSort.column = col;
+          state.tradeTableSort.direction = defaultTradeSortDirection(col);
+        }
+        persistTradeTableSort();
+        render();
+      }
+      return;
+    }
+  }
   if (e.key !== "Escape") return;
   const menu = $("#trade-row-menu");
   if (menu && !menu.classList.contains("hidden")) {

@@ -3,7 +3,7 @@ import uuid
 import logging
 from pathlib import Path
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from supabase import create_client, Client
 
 from fastapi import FastAPI, HTTPException, Depends, Security, UploadFile, File, Body, Query
@@ -47,6 +47,7 @@ class TradeMetaUpset(BaseModel):
     notes: Optional[str] = None
     risk_per_share: Optional[float] = None
     screenshot_url: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
 
 class AuthRequest(BaseModel):
     email: str
@@ -76,6 +77,12 @@ class ImportCreate(BaseModel):
     broker: str
     tags: list[str] = []
     filename: Optional[str] = None
+    account_id: Optional[str] = None
+
+
+class TradingAccountCreate(BaseModel):
+    label: str
+    broker: Optional[str] = None
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
@@ -128,6 +135,7 @@ async def upsert_meta(request: TradeMetaUpset, user=Depends(get_current_user)):
         "notes": request.notes,
         "risk_per_share": request.risk_per_share,
         "screenshot_url": request.screenshot_url,
+        "tags": [t.strip() for t in (request.tags or []) if str(t).strip()],
         "user_id": user.id
     }).execute()
     return res.data
@@ -222,6 +230,10 @@ async def delete_all_trades(user=Depends(get_current_user)):
     supabase_admin.table("trade_meta").delete().eq("user_id", user.id).execute()
     supabase_admin.table("balance_snapshots").delete().eq("user_id", user.id).execute()
     supabase_admin.table("imports").delete().eq("user_id", user.id).execute()
+    try:
+        supabase_admin.table("trading_accounts").delete().eq("user_id", user.id).execute()
+    except Exception as e:
+        logger.warning("trading_accounts cleanup for user %s: %s", user.id, e)
     return {
         "message": "All trades, meta, balance history, and import records (tags) deleted successfully",
     }
@@ -232,6 +244,10 @@ async def delete_account(user=Depends(get_current_user)):
     supabase_admin.table("trade_meta").delete().eq("user_id", user.id).execute()
     supabase_admin.table("balance_snapshots").delete().eq("user_id", user.id).execute()
     supabase_admin.table("imports").delete().eq("user_id", user.id).execute()
+    try:
+        supabase_admin.table("trading_accounts").delete().eq("user_id", user.id).execute()
+    except Exception as e:
+        logger.warning("trading_accounts cleanup for user %s: %s", user.id, e)
     try:
         supabase_admin.storage.from_("screenshots").remove([f"{user.id}/"])
     except Exception as e:
@@ -322,14 +338,185 @@ async def refresh_token(body: dict = Body(...)):
     except Exception as e:
         raise HTTPException(status_code=401, detail="Session expired")
 
+
+@app.get("/api/accounts")
+async def list_trading_accounts(user=Depends(get_current_user)):
+    try:
+        res = (
+            supabase_admin.table("trading_accounts")
+            .select("*")
+            .eq("user_id", user.id)
+            .execute()
+        )
+        rows = list(res.data or [])
+        rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+        return rows
+    except Exception as e:
+        logger.exception("GET /api/accounts failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not load trading accounts: {e!s}",
+        ) from e
+
+
+@app.post("/api/accounts")
+async def create_trading_account(body: TradingAccountCreate, user=Depends(get_current_user)):
+    label = (body.label or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="label is required")
+    broker = (body.broker or "").strip() or None
+    try:
+        res = supabase_admin.table("trading_accounts").insert(
+            {
+                "user_id": user.id,
+                "label": label,
+                "broker": broker,
+            }
+        ).execute()
+        return res.data
+    except Exception as e:
+        logger.exception("POST /api/accounts failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not create trading account: {e!s}",
+        ) from e
+
+
+@app.post("/api/accounts/backfill")
+async def backfill_trading_accounts(user=Depends(get_current_user)):
+    """
+    Imports created before trading accounts had `account_id` are orphans: broker
+    lives on the import row but nothing appears in the trading-account dropdown.
+    Create one `Legacy · {broker}` account per distinct orphan broker and set
+    `imports.account_id`. Idempotent for already-linked imports.
+    """
+    uid = user.id
+    try:
+        imp_res = (
+            supabase_admin.table("imports")
+            .select("id", "broker", "account_id")
+            .eq("user_id", uid)
+            .execute()
+        )
+        imports_list = list(imp_res.data or [])
+    except Exception as e:
+        logger.exception("backfill: list imports")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not list imports for backfill: {e!s}",
+        ) from e
+
+    orphans = [r for r in imports_list if not r.get("account_id")]
+    if not orphans:
+        return {"linked": 0, "created_accounts": 0}
+
+    try:
+        ac_res = (
+            supabase_admin.table("trading_accounts")
+            .select("id", "label", "broker")
+            .eq("user_id", uid)
+            .execute()
+        )
+        accounts = list(ac_res.data or [])
+    except Exception as e:
+        logger.exception("backfill: list trading_accounts")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not list trading accounts: {e!s}",
+        ) from e
+
+    legacy_by_broker: dict[str, str] = {}
+    for a in accounts:
+        label = str(a.get("label") or "")
+        b = (str(a.get("broker") or "").strip() or "Other")
+        if label.startswith("Legacy ·"):
+            legacy_by_broker.setdefault(b, a["id"])
+
+    created = 0
+    linked = 0
+    for imp in orphans:
+        broker = (str(imp.get("broker") or "").strip() or "Other")
+        aid = legacy_by_broker.get(broker)
+        if not aid:
+            try:
+                ins = supabase_admin.table("trading_accounts").insert(
+                    {
+                        "user_id": uid,
+                        "label": f"Legacy · {broker}",
+                        "broker": broker,
+                    }
+                ).execute()
+            except Exception as e:
+                logger.exception("backfill: insert trading_account")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Could not create legacy trading account: {e!s}",
+                ) from e
+            row = (ins.data or [None])[0]
+            if not row:
+                continue
+            aid = row["id"]
+            legacy_by_broker[broker] = aid
+            created += 1
+        try:
+            supabase_admin.table("imports").update({"account_id": aid}).eq(
+                "id", imp["id"]
+            ).eq("user_id", uid).execute()
+        except Exception as e:
+            logger.exception("backfill: update import")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not link import to trading account (ensure imports.account_id exists): {e!s}",
+            ) from e
+        linked += 1
+
+    return {"linked": linked, "created_accounts": created}
+
+
+@app.delete("/api/accounts/{account_id}")
+async def delete_trading_account(account_id: str, user=Depends(get_current_user)):
+    chk = (
+        supabase_admin.table("imports")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("account_id", account_id)
+        .limit(1)
+        .execute()
+    )
+    if chk.data:
+        raise HTTPException(
+            status_code=400,
+            detail="This account still has CSV imports linked to it. Remove those imports (or delete all trades) before deleting the account.",
+        )
+    supabase_admin.table("trading_accounts").delete().eq("user_id", user.id).eq(
+        "id", account_id
+    ).execute()
+    return {"ok": True}
+
+
 @app.post("/api/imports")
 async def create_import(body: ImportCreate, user=Depends(get_current_user)):
-    res = supabase_admin.table("imports").insert({
+    insert_payload = {
         "user_id": user.id,
         "broker": body.broker,
         "tags": body.tags,
-        "filename": body.filename
-    }).execute()
+        "filename": body.filename,
+    }
+    if body.account_id:
+        ok = (
+            supabase_admin.table("trading_accounts")
+            .select("id")
+            .eq("user_id", user.id)
+            .eq("id", body.account_id)
+            .limit(1)
+            .execute()
+        )
+        if not ok.data:
+            raise HTTPException(
+                status_code=400, detail="Unknown trading account for this user"
+            )
+        insert_payload["account_id"] = body.account_id
+    res = supabase_admin.table("imports").insert(insert_payload).execute()
     return res.data
 
 @app.get("/api/imports")
