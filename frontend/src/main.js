@@ -143,6 +143,40 @@ const LS_UPLOAD_ACCOUNT = "tradetracker_upload_account_id";
 const LS_DISPLAY_ACCOUNT = "tradetracker_display_account_id";
 const LS_DASHBOARD_TAGS = "tradetracker_dashboard_tags";
 const LS_TRADE_TABLE_SORT = "tradetracker_trades_table_sort";
+const LS_CALENDAR_DAY_NOTES = "tradetracker_calendar_day_notes";
+
+function readCalendarDayNotesFromStorage() {
+  try {
+    const raw = localStorage.getItem(LS_CALENDAR_DAY_NOTES);
+    if (raw) {
+      const j = JSON.parse(raw);
+      if (j && typeof j === "object" && !Array.isArray(j)) {
+        const out = {};
+        for (const [k, v] of Object.entries(j)) {
+          const ck = canonicalDateKey(k);
+          if (!ck || typeof v !== "string") continue;
+          const t = v.trim();
+          if (t) out[ck] = v;
+        }
+        return out;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return {};
+}
+
+function persistCalendarDayNotes() {
+  try {
+    localStorage.setItem(
+      LS_CALENDAR_DAY_NOTES,
+      JSON.stringify(state.calendarDayNotes),
+    );
+  } catch {
+    /* ignore */
+  }
+}
 
 /** Columns that support header / mobile sorting on the calendar trades table. */
 const TRADE_TABLE_SORT_COLUMNS = new Set([
@@ -260,6 +294,8 @@ let state = {
   pnlHeatmapYear: new Date().getFullYear(),
   /** Calendar trades table: column id + asc/desc (persisted). */
   tradeTableSort: readTradeTableSortFromStorage(),
+  /** Per calendar day (YYYY-MM-DD) free-form notes; localStorage only. */
+  calendarDayNotes: readCalendarDayNotesFromStorage(),
 };
 
 let metaPopoverHideTimer = null;
@@ -1677,6 +1713,28 @@ function render() {
       <button type="button" id="screenshot-lightbox-close" class="absolute top-3 right-3 sm:top-4 sm:right-4 z-10 min-h-[44px] min-w-[44px] rounded-lg text-3xl leading-none text-slate-400 hover:text-white hover:bg-white/10 transition-colors" aria-label="Close enlarged view">&times;</button>
       <img id="screenshot-lightbox-img" alt="" class="max-h-[min(92vh,92dvh)] max-w-full w-auto h-auto object-contain shadow-2xl select-none" draggable="false" />
     </div>
+
+    <div id="calendar-day-note-modal" class="fixed inset-0 z-[60] hidden items-center justify-center bg-black/70 backdrop-blur-sm p-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]" role="dialog" aria-modal="true" aria-labelledby="calendar-day-note-modal-heading" aria-hidden="true">
+      <div class="bg-surface-raised border border-slate-800 rounded-xl max-w-md w-full max-h-[min(88vh,100dvh-2rem)] overflow-y-auto shadow-2xl">
+        <div class="p-4 border-b border-slate-800 flex justify-between items-start gap-3">
+          <div>
+            <h3 id="calendar-day-note-modal-heading" class="text-base font-semibold text-white">Day comment</h3>
+            <p class="text-xs text-slate-500 mt-1" id="calendar-day-note-modal-date"></p>
+          </div>
+          <button type="button" id="calendar-day-note-cancel" class="text-slate-500 hover:text-white text-2xl leading-none min-h-[44px] min-w-[44px] shrink-0 rounded-lg hover:bg-slate-800/80" aria-label="Close">&times;</button>
+        </div>
+        <div class="p-4 space-y-4">
+          <div>
+            <label for="calendar-day-note-text" class="block text-xs font-medium text-slate-500 mb-1">Comment</label>
+            <textarea id="calendar-day-note-text" rows="5" class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent" placeholder="Journal, context, what stood out…"></textarea>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" id="calendar-day-note-save" class="min-h-[44px] px-4 rounded-lg bg-accent text-white text-sm font-medium hover:bg-blue-500 transition-colors">Save</button>
+            <button type="button" id="calendar-day-note-clear" class="min-h-[44px] px-4 rounded-lg border border-slate-600 text-slate-300 text-sm hover:bg-slate-800/80 transition-colors">Clear note</button>
+          </div>
+        </div>
+      </div>
+    </div>
   `;
 
   bind();
@@ -2619,6 +2677,9 @@ function bind() {
         persistDashboardTagFilters();
         state.tradeMetaById.clear();
         state.screenshotUrls.clear();
+        state.calendarDayNotes = {};
+        persistCalendarDayNotes();
+        closeCalendarDayNoteModal();
         state.filesLabel = "No files loaded";
         render();
       } catch (e) {
@@ -2834,11 +2895,28 @@ function paintCalendar() {
            </div>`
         : `<div class="flex-1 min-h-[4rem]"></div>`;
 
+      const dayNoteRaw = state.calendarDayNotes[key] ?? "";
+      const dayNote = dayNoteRaw.replace(/\r\n/g, "\n").trim();
+      const hasDayNote = dayNote.length > 0;
+      const noteBadgeClass = hasDayNote
+        ? "bg-amber-500/25 text-amber-200 ring-1 ring-amber-500/40"
+        : "bg-slate-800 text-slate-600 ring-1 ring-slate-700/80";
+      const tipHtml = hasDayNote
+        ? `<div class="cal-day-note-tip pointer-events-none absolute left-1/2 bottom-full z-30 mb-1 w-[min(18rem,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-slate-600 bg-slate-950/50 p-2 text-left text-[11px] leading-snug text-slate-200 shadow-xl opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 max-h-36 overflow-y-auto whitespace-pre-wrap">${escapeHtml(dayNote)}</div>`
+        : "";
+
       dayCells += `
         <button type="button" data-day="${key}"
-          class="cal-cell relative rounded-xl border text-left min-h-[4.75rem] sm:min-h-[5.75rem] transition-all active:opacity-90 hover:ring-1 hover:ring-accent/40 ${cardBg} ${sel ? "ring-2 ring-accent" : ""} ${inMonth ? "" : "opacity-55"}">
+          class="cal-cell group relative rounded-xl border text-left min-h-[4.75rem] sm:min-h-[5.75rem] transition-all active:opacity-90 hover:ring-1 hover:ring-accent/40 ${cardBg} ${sel ? "ring-2 ring-accent" : ""} ${inMonth ? "" : "opacity-55"}">
           <span class="absolute top-2 right-2 text-xs font-medium ${inMonth ? "text-slate-400" : "text-slate-600"}">${dom}</span>
           ${centerBlock}
+          <span
+            role="presentation"
+            class="cal-day-note-btn absolute bottom-1.5 left-1.5 z-20 inline-flex h-7 w-7 items-center justify-center rounded text-[10px] font-semibold ${noteBadgeClass} pointer-events-auto hover:brightness-110"
+            data-cal-day-note="${escapeAttr(key)}"
+            title="${hasDayNote ? "Edit day comment" : "Add day comment"}"
+          >N</span>
+          ${tipHtml}
         </button>`;
     }
 
@@ -2877,14 +2955,25 @@ function paintCalendar() {
       render();
     });
   });
+  grid.querySelectorAll(".cal-day-note-btn").forEach((badge) => {
+    badge.addEventListener("click", (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const k = badge.getAttribute("data-cal-day-note");
+      if (k) openCalendarDayNoteModal(k);
+    });
+  });
 }
 
 let modalScreenshotDataUrl = null;
 let modalCurrentId = null;
+/** YYYY-MM-DD while calendar day note editor is open. */
+let calendarDayNoteModalDateKey = null;
 
 async function openModal(tradeId) {
   closeMetaPopover();
   closeMobileNav();
+  closeCalendarDayNoteModal();
   const t = state.trades.find((x) => x.id === tradeId);
   if (!t) return;
   state.detailTrade = t;
@@ -2961,6 +3050,74 @@ function closeScreenshotLightbox() {
     lb.classList.remove("flex");
     lb.setAttribute("aria-hidden", "true");
   }
+}
+
+function openCalendarDayNoteModal(dateKey) {
+  const k = canonicalDateKey(dateKey);
+  if (!k) return;
+  calendarDayNoteModalDateKey = k;
+  const el = $("#calendar-day-note-modal");
+  const ta = $("#calendar-day-note-text");
+  const dateLine = $("#calendar-day-note-modal-date");
+  if (!el || !ta) return;
+  const text = state.calendarDayNotes[k] ?? "";
+  ta.value = text;
+  if (dateLine) {
+    try {
+      const [yy, mm, dd] = k.split("-").map(Number);
+      const d = new Date(yy, mm - 1, dd);
+      dateLine.textContent = d.toLocaleDateString(undefined, {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      });
+    } catch {
+      dateLine.textContent = k;
+    }
+  }
+  el.classList.remove("hidden");
+  el.classList.add("flex");
+  el.setAttribute("aria-hidden", "false");
+  queueMicrotask(() => ta.focus());
+}
+
+function closeCalendarDayNoteModal() {
+  calendarDayNoteModalDateKey = null;
+  const el = $("#calendar-day-note-modal");
+  const ta = $("#calendar-day-note-text");
+  if (ta) ta.value = "";
+  if (el) {
+    el.classList.add("hidden");
+    el.classList.remove("flex");
+    el.setAttribute("aria-hidden", "true");
+  }
+}
+
+function saveCalendarDayNoteFromModal() {
+  if (!calendarDayNoteModalDateKey) return;
+  const k = canonicalDateKey(calendarDayNoteModalDateKey);
+  if (!k) return;
+  const raw = $("#calendar-day-note-text")?.value ?? "";
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    delete state.calendarDayNotes[k];
+  } else {
+    state.calendarDayNotes[k] = raw.replace(/\r\n/g, "\n").trim();
+  }
+  persistCalendarDayNotes();
+  closeCalendarDayNoteModal();
+  paintCalendar();
+}
+
+function clearCalendarDayNoteFromModal() {
+  if (!calendarDayNoteModalDateKey) return;
+  const k = canonicalDateKey(calendarDayNoteModalDateKey);
+  if (!k) return;
+  delete state.calendarDayNotes[k];
+  persistCalendarDayNotes();
+  closeCalendarDayNoteModal();
+  paintCalendar();
 }
 
 async function performDeleteTrade(id) {
@@ -3194,6 +3351,26 @@ document.querySelector("#app")?.addEventListener("change", (e) => {
 document.addEventListener("click", onGlobalClickForTradeMenu);
 document.addEventListener("click", (e) => {
   const t = e.target;
+  if (t?.closest?.("#calendar-day-note-save")) {
+    e.preventDefault();
+    saveCalendarDayNoteFromModal();
+    return;
+  }
+  if (t?.closest?.("#calendar-day-note-clear")) {
+    e.preventDefault();
+    clearCalendarDayNoteFromModal();
+    return;
+  }
+  if (t?.closest?.("#calendar-day-note-cancel")) {
+    e.preventDefault();
+    closeCalendarDayNoteModal();
+    return;
+  }
+  const cdnm = $("#calendar-day-note-modal");
+  if (cdnm && !cdnm.classList.contains("hidden") && t === cdnm) {
+    closeCalendarDayNoteModal();
+    return;
+  }
   if (t?.id === "modal-img" && t instanceof HTMLImageElement) {
     const src = t.currentSrc || t.src;
     if (src) {
@@ -3236,6 +3413,12 @@ document.addEventListener("keydown", (e) => {
   if (shotLb && !shotLb.classList.contains("hidden")) {
     e.preventDefault();
     closeScreenshotLightbox();
+    return;
+  }
+  const calNoteM = $("#calendar-day-note-modal");
+  if (calNoteM && !calNoteM.classList.contains("hidden")) {
+    e.preventDefault();
+    closeCalendarDayNoteModal();
     return;
   }
   const menu = $("#trade-row-menu");
