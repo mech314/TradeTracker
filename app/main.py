@@ -80,6 +80,10 @@ class ImportCreate(BaseModel):
     account_id: Optional[str] = None
 
 
+class ImportTagsUpdate(BaseModel):
+    tags: list[str] = Field(default_factory=list)
+
+
 class TradingAccountCreate(BaseModel):
     label: str
     broker: Optional[str] = None
@@ -549,6 +553,38 @@ async def list_imports(user=Depends(get_current_user)):
             status_code=500,
             detail=f"Could not load imports: {e!s}",
         ) from e
+
+
+@app.patch("/api/imports/{import_id}")
+async def patch_import_tags(
+    import_id: str, body: ImportTagsUpdate, user=Depends(get_current_user)
+):
+    """Update strategy tags for one CSV import (applies to all trades from that upload)."""
+    tid = str(import_id).strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="Missing import id")
+    tags_clean = [str(t).strip() for t in (body.tags or []) if str(t).strip()]
+    uid = str(user.id)
+    try:
+        res = (
+            supabase_admin.table("imports")
+            .update({"tags": tags_clean})
+            .eq("user_id", uid)
+            .eq("id", tid)
+            .execute()
+        )
+    except Exception as e:
+        logger.exception("PATCH /api/imports/%s failed", tid)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not update import: {e!s}",
+        ) from e
+    data = res.data
+    rows = data if isinstance(data, list) else ([data] if data else [])
+    if not rows:
+        raise HTTPException(status_code=404, detail="Import not found")
+    return rows[0]
+
 
 if STATIC.is_dir():
     app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")

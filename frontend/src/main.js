@@ -43,6 +43,7 @@ import {
   apiGetBalance,
   apiCreateImport,
   apiGetImports,
+  apiUpdateImportTags,
   apiGetAccounts,
   apiCreateTradingAccount,
   apiDeleteTradingAccount,
@@ -395,6 +396,18 @@ function normImportId(v) {
   return String(v).trim().toLowerCase();
 }
 
+/**
+ * Normalized key for tag equality (dashboard filters, import vs per-trade tags).
+ * Trims, lowercases, strips leading `#` so `#9EMA` and `9EMA` match.
+ */
+function tagKeyForMatch(s) {
+  let t = String(s ?? "").trim().toLowerCase();
+  while (t.startsWith("#")) {
+    t = t.slice(1).trim();
+  }
+  return t;
+}
+
 function importIdsForTradingAccount(imports, accountId) {
   const want = normImportId(accountId);
   if (!want) return null;
@@ -499,27 +512,143 @@ function brokerPlatformSelectHtml(idAttr, selected) {
 /**
  * Dashboard tag chips use **AND**: every selected tag must appear on the trade’s
  * import tags and/or that same trade’s meta tags (union), case-insensitive.
+ * Matching uses {@link tagKeyForMatch} so `#ORB` and `ORB` are the same.
  */
-function tradeMatchesAllDashboardTags(trade, importsScope, wantLc) {
-  if (!wantLc.length) return true;
+function tradeMatchesAllDashboardTags(trade, importsScope, wantMatchKeys) {
+  if (!wantMatchKeys.length) return true;
   const pid = normImportId(trade.importId);
-  const importLc = [];
+  const keys = [];
   if (pid) {
     const im = (importsScope || []).find(
       (row) => normImportId(row.id) === pid,
     );
     if (im) {
-      importLc.push(
-        ...importTagsAsArray(im.tags)
-          .map((x) => String(x).trim().toLowerCase())
-          .filter(Boolean),
-      );
+      for (const x of importTagsAsArray(im.tags)) {
+        const k = tagKeyForMatch(x);
+        if (k) keys.push(k);
+      }
     }
   }
   const meta = state.tradeMetaById.get(trade.id);
-  const tradeLc = tradeMetaTagsNormalized(meta).map((x) => x.toLowerCase());
-  const combined = new Set([...importLc, ...tradeLc]);
-  return wantLc.every((w) => combined.has(w));
+  for (const x of tradeMetaTagsNormalized(meta)) {
+    const k = tagKeyForMatch(x);
+    if (k) keys.push(k);
+  }
+  const combined = new Set(keys);
+  return wantMatchKeys.every((w) => combined.has(w));
+}
+
+/** Tags from the CSV import row linked to this trade. */
+function importTagsForTrade(trade) {
+  const pid = normImportId(trade?.importId);
+  if (!pid) return [];
+  const im = (state.imports || []).find(
+    (row) => normImportId(row.id) === pid,
+  );
+  return im ? importTagsAsArray(im.tags) : [];
+}
+
+/** Trim, drop empties, dedupe case-insensitively (keep first spelling). */
+function normalizeTradeTagList(list) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of list || []) {
+    const s = String(raw || "").trim();
+    if (!s) continue;
+    const lc = s.toLowerCase();
+    if (seen.has(lc)) continue;
+    seen.add(lc);
+    out.push(s);
+  }
+  return out;
+}
+
+function renderModalTradeTagChips() {
+  const wrap = $("#modal-trade-tags-chips");
+  if (!wrap) return;
+  const tags = normalizeTradeTagList(modalTradeTagsDraft);
+  modalTradeTagsDraft = [...tags];
+  if (!tags.length) {
+    wrap.innerHTML = `<span class="text-xs text-slate-500 italic">No per-trade tags yet — add one below.</span>`;
+    return;
+  }
+  wrap.innerHTML = tags
+    .map(
+      (tg) =>
+        `<span class="inline-flex items-center gap-0.5 rounded-md border border-violet-500/35 bg-violet-500/15 pl-2 pr-0.5 py-0.5 text-[11px] text-violet-100 max-w-full min-w-0">
+    <span class="min-w-0 truncate">${escapeHtml(tg)}</span>
+    <button type="button" class="modal-trade-tag-remove shrink-0 rounded p-1 text-slate-400 hover:text-white hover:bg-white/10 min-h-[28px] min-w-[28px] flex items-center justify-center" data-remove-tag="${encodeURIComponent(tg)}" aria-label="Remove tag ${escapeAttr(tg)}">×</button>
+  </span>`,
+    )
+    .join("");
+}
+
+function addModalTradeTagFromInput() {
+  const inp = $("#modal-trade-tag-add");
+  if (!inp) return;
+  const raw = String(inp.value || "").trim();
+  if (!raw) return;
+  const tag = raw.replace(/\s+/g, " ");
+  const lc = tag.toLowerCase();
+  const tags = normalizeTradeTagList(modalTradeTagsDraft);
+  if (tags.some((t) => t.toLowerCase() === lc)) {
+    inp.value = "";
+    return;
+  }
+  tags.push(tag);
+  modalTradeTagsDraft = tags;
+  inp.value = "";
+  renderModalTradeTagChips();
+}
+
+let modalImportEditId = null;
+/** Import-level tags while trade modal is open (saved on Save). */
+let modalImportTagsDraft = [];
+
+function renderModalImportTagChips() {
+  const wrap = $("#modal-import-tags-chips");
+  const addRow = $("#modal-import-tags-add-row");
+  if (!wrap) return;
+  if (!modalImportEditId) {
+    wrap.innerHTML = `<span class="text-xs text-slate-500 italic">No import linked — import tags apply to trades loaded from a CSV upload with an import id.</span>`;
+    if (addRow) addRow.classList.add("hidden");
+    return;
+  }
+  if (addRow) addRow.classList.remove("hidden");
+  const tags = normalizeTradeTagList(modalImportTagsDraft);
+  modalImportTagsDraft = [...tags];
+  if (!tags.length) {
+    wrap.innerHTML = `<span class="text-xs text-slate-500 italic">No import tags yet — add one below.</span>`;
+    return;
+  }
+  wrap.innerHTML = tags
+    .map(
+      (tg) =>
+        `<span class="inline-flex items-center gap-0.5 rounded-md border border-amber-500/35 bg-amber-500/15 pl-2 pr-0.5 py-0.5 text-[11px] text-amber-100 max-w-full min-w-0">
+    <span class="min-w-0 truncate">${escapeHtml(tg)}</span>
+    <button type="button" class="modal-import-tag-remove shrink-0 rounded p-1 text-slate-400 hover:text-white hover:bg-white/10 min-h-[28px] min-w-[28px] flex items-center justify-center" data-remove-import-tag="${encodeURIComponent(tg)}" aria-label="Remove import tag ${escapeAttr(tg)}">×</button>
+  </span>`,
+    )
+    .join("");
+}
+
+function addModalImportTagFromInput() {
+  if (!modalImportEditId) return;
+  const inp = $("#modal-import-tag-add");
+  if (!inp) return;
+  const raw = String(inp.value || "").trim();
+  if (!raw) return;
+  const tag = raw.replace(/\s+/g, " ");
+  const lc = tag.toLowerCase();
+  const tags = normalizeTradeTagList(modalImportTagsDraft);
+  if (tags.some((t) => t.toLowerCase() === lc)) {
+    inp.value = "";
+    return;
+  }
+  tags.push(tag);
+  modalImportTagsDraft = tags;
+  inp.value = "";
+  renderModalImportTagChips();
 }
 
 function filteredTradesByTagsAny(trades, imports, tags) {
@@ -529,9 +658,12 @@ function filteredTradesByTagsAny(trades, imports, tags) {
       ]
     : [];
   if (!want.length) return trades || [];
-  const wantLc = want.map((t) => t.toLowerCase());
-  return (trades || []).filter((t) =>
-    tradeMatchesAllDashboardTags(t, imports, wantLc),
+  const wantMatchKeys = want
+    .map((t) => tagKeyForMatch(t))
+    .filter(Boolean);
+  if (!wantMatchKeys.length) return trades || [];
+  return (trades || []).filter((tr) =>
+    tradeMatchesAllDashboardTags(tr, imports, wantMatchKeys),
   );
 }
 
@@ -1370,15 +1502,25 @@ function render() {
     importsScope,
     baseTradesForTags,
   );
-  const tagLcToCanon = new Map(
-    tagOptions.map((t) => [String(t).trim().toLowerCase(), String(t).trim()]),
-  );
+  const tagLcToCanon = new Map();
+  for (const t of tagOptions) {
+    const label = String(t).trim();
+    if (!label) continue;
+    tagLcToCanon.set(label.toLowerCase(), label);
+    const k = tagKeyForMatch(label);
+    if (k && !tagLcToCanon.has(k)) tagLcToCanon.set(k, label);
+  }
   state.dashboardTagFilters = [
     ...new Set(
       (state.dashboardTagFilters || [])
         .map((t) => String(t).trim())
         .filter(Boolean)
-        .map((t) => tagLcToCanon.get(t.toLowerCase()) || t),
+        .map(
+          (t) =>
+            tagLcToCanon.get(t.toLowerCase()) ??
+            tagLcToCanon.get(tagKeyForMatch(t)) ??
+            t,
+        ),
     ),
   ];
   persistDashboardTagFilters();
@@ -1690,10 +1832,24 @@ function render() {
             <textarea id="modal-notes" rows="4" class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent" placeholder="Setup, mistakes, context…"></textarea>
           </div>
           <div>
-            <label class="block text-xs font-medium text-slate-500 mb-1">Tags (comma-separated)</label>
-            <input type="text" id="modal-trade-tags" autocomplete="off" spellcheck="false" placeholder="e.g. first touch, gap fill"
-              class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-accent" />
-            <p class="text-[11px] text-slate-600 mt-1">Each tag is matched on the trade’s import <strong class="text-slate-500">or</strong> on this trade. Dashboard filters use <strong class="text-slate-500">every</strong> selected tag together (AND).</p>
+            <label class="block text-xs font-medium text-slate-500 mb-1">Import tags</label>
+            <div id="modal-import-tags-chips" class="flex flex-wrap gap-1.5 mb-2 min-h-[2rem] items-center"></div>
+            <div id="modal-import-tags-add-row" class="flex flex-col sm:flex-row gap-2">
+              <input type="text" id="modal-import-tag-add" autocomplete="off" spellcheck="false" placeholder="Add a tag…"
+                class="min-w-0 flex-1 rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-accent" />
+              <button type="button" id="modal-import-tag-add-btn" class="min-h-[44px] shrink-0 rounded-lg border border-slate-600 px-4 text-sm text-slate-200 hover:bg-slate-800/80 transition-colors">Add</button>
+            </div>
+            <p class="text-[11px] text-slate-600 mt-1">These apply to <strong class="text-slate-500">every trade</strong> from this CSV upload. Edit here and press <strong class="text-slate-400">Save</strong> (same as per-trade tags below).</p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-500 mb-1">Tags on this trade</label>
+            <div id="modal-trade-tags-chips" class="flex flex-wrap gap-1.5 mb-2 min-h-[2rem] items-center"></div>
+            <div class="flex flex-col sm:flex-row gap-2">
+              <input type="text" id="modal-trade-tag-add" autocomplete="off" spellcheck="false" placeholder="Add a tag…"
+                class="min-w-0 flex-1 rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-accent" />
+              <button type="button" id="modal-trade-tag-add-btn" class="min-h-[44px] shrink-0 rounded-lg border border-slate-600 px-4 text-sm text-slate-200 hover:bg-slate-800/80 transition-colors">Add</button>
+            </div>
+            <p class="text-[11px] text-slate-600 mt-1">Remove tags with <strong class="text-slate-500">×</strong>. Dashboard filters match import tags <strong class="text-slate-500">or</strong> these per-trade tags (every selected chip must match).</p>
           </div>
           <div>
             <label class="block text-xs font-medium text-slate-500 mb-1">Screenshot</label>
@@ -1906,7 +2062,7 @@ function cancelHideDashboardTagSuggestions() {
 
 function dashboardTagPickerPool() {
   const chosen = new Set(
-    (state.dashboardTagFilters || []).map((t) => String(t).trim().toLowerCase()),
+    (state.dashboardTagFilters || []).map((t) => tagKeyForMatch(t)).filter(Boolean),
   );
   const all = mergedDashboardTagOptions(
     importsInDisplayScope(state.imports, state.displayAccountId),
@@ -1916,7 +2072,7 @@ function dashboardTagPickerPool() {
       state.displayAccountId,
     ),
   );
-  return all.filter((t) => !chosen.has(String(t).trim().toLowerCase()));
+  return all.filter((t) => !chosen.has(tagKeyForMatch(t)));
 }
 
 function computeDashboardTagSuggestionRows() {
@@ -1994,15 +2150,23 @@ function addDashboardTagFilter(raw) {
       state.displayAccountId,
     ),
   );
-  const lc = t.toLowerCase();
-  const canon =
-    new Map(
-      opts.map((x) => [String(x).trim().toLowerCase(), String(x).trim()]),
-    ).get(lc) || t;
-  const cur = new Set(
-    (state.dashboardTagFilters || []).map((x) => String(x).trim().toLowerCase()),
+  const byLower = new Map(
+    opts.map((x) => [String(x).trim().toLowerCase(), String(x).trim()]),
   );
-  if (cur.has(canon.toLowerCase())) return false;
+  const byKey = new Map();
+  for (const x of opts) {
+    const label = String(x).trim();
+    if (!label) continue;
+    const k = tagKeyForMatch(label);
+    if (k && !byKey.has(k)) byKey.set(k, label);
+  }
+  const lc = t.toLowerCase();
+  const key = tagKeyForMatch(t);
+  const canon = byLower.get(lc) ?? byKey.get(key) ?? t;
+  const cur = new Set(
+    (state.dashboardTagFilters || []).map((x) => tagKeyForMatch(x)).filter(Boolean),
+  );
+  if (cur.has(tagKeyForMatch(canon))) return false;
   state.dashboardTagFilters = [...(state.dashboardTagFilters || []), canon];
   persistDashboardTagFilters();
   return true;
@@ -2967,6 +3131,8 @@ function paintCalendar() {
 
 let modalScreenshotDataUrl = null;
 let modalCurrentId = null;
+/** Per-trade tag list while trade modal is open (saved on Save). */
+let modalTradeTagsDraft = [];
 /** YYYY-MM-DD while calendar day note editor is open. */
 let calendarDayNoteModalDateKey = null;
 
@@ -2991,10 +3157,18 @@ async function openModal(tradeId) {
   $("#modal-title").textContent = `${t.symbol} · ${t.openSide}`;
   $("#modal-sub").textContent = `${t.id.split("|").slice(0, 2).join(" · ")}`;
   $("#modal-notes").value = meta.notes || "";
-  const mTags = $("#modal-trade-tags");
-  if (mTags) {
-    mTags.value = tradeMetaTagsNormalized(meta).join(", ");
-  }
+  const iid = normImportId(t.importId);
+  modalImportEditId = iid || null;
+  modalImportTagsDraft = iid
+    ? normalizeTradeTagList(importTagsForTrade(t))
+    : [];
+  renderModalImportTagChips();
+  const impAddIn = $("#modal-import-tag-add");
+  if (impAddIn) impAddIn.value = "";
+  modalTradeTagsDraft = normalizeTradeTagList(tradeMetaTagsNormalized(meta));
+  renderModalTradeTagChips();
+  const tagAddIn = $("#modal-trade-tag-add");
+  if (tagAddIn) tagAddIn.value = "";
   const mr = $("#modal-risk");
   if (mr) {
     mr.value =
@@ -3024,6 +3198,9 @@ function closeModal() {
   $("#modal").classList.remove("flex");
   modalCurrentId = null;
   modalScreenshotDataUrl = null;
+  modalTradeTagsDraft = [];
+  modalImportEditId = null;
+  modalImportTagsDraft = [];
 }
 
 function openScreenshotLightbox(src) {
@@ -3157,22 +3334,11 @@ function clearModalShot() {
   $("#modal-shot").value = "";
 }
 
-function parseCommaSeparatedTags(raw) {
-  return [
-    ...new Set(
-      String(raw || "")
-        .split(",")
-        .map((x) => x.trim())
-        .filter(Boolean),
-    ),
-  ];
-}
-
 async function saveModal() {
   if (!modalCurrentId) return;
 
   const rawRisk = $("#modal-risk")?.value?.trim() ?? "";
-  const tags = parseCommaSeparatedTags($("#modal-trade-tags")?.value ?? "");
+  const tags = normalizeTradeTagList(modalTradeTagsDraft);
   const patch = {
     id: modalCurrentId,
     notes: $("#modal-notes").value,
@@ -3186,6 +3352,24 @@ async function saveModal() {
   }
 
   try {
+    if (modalImportEditId) {
+      const importTags = normalizeTradeTagList(modalImportTagsDraft);
+      const updatedImport = await apiUpdateImportTags(
+        modalImportEditId,
+        importTags,
+      );
+      const want = normImportId(modalImportEditId);
+      const ix = state.imports.findIndex((r) => normImportId(r.id) === want);
+      const mergedTags = updatedImport?.tags
+        ? importTagsAsArray(updatedImport.tags)
+        : importTags;
+      if (ix >= 0) {
+        state.imports[ix] = { ...state.imports[ix], tags: mergedTags };
+      } else if (updatedImport?.id) {
+        state.imports = [...(state.imports || []), updatedImport];
+      }
+    }
+
     let screenshotUrl = state.tradeMetaById.get(modalCurrentId)?.screenshotUrl ?? null;
 
     if (modalScreenshotExplicitlyCleared) {
@@ -3351,6 +3535,60 @@ document.querySelector("#app")?.addEventListener("change", (e) => {
 document.addEventListener("click", onGlobalClickForTradeMenu);
 document.addEventListener("click", (e) => {
   const t = e.target;
+  const rmImp = t?.closest?.(".modal-import-tag-remove");
+  if (rmImp && modalImportEditId && modalCurrentId) {
+    const modal = $("#modal");
+    if (modal && !modal.classList.contains("hidden")) {
+      const enc = rmImp.getAttribute("data-remove-import-tag");
+      if (enc == null) return;
+      let tag;
+      try {
+        tag = decodeURIComponent(enc);
+      } catch {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      modalImportTagsDraft = modalImportTagsDraft.filter((x) => x !== tag);
+      renderModalImportTagChips();
+      return;
+    }
+  }
+  if (t?.closest?.("#modal-import-tag-add-btn") && modalImportEditId && modalCurrentId) {
+    const modal = $("#modal");
+    if (modal && !modal.classList.contains("hidden")) {
+      e.preventDefault();
+      addModalImportTagFromInput();
+      return;
+    }
+  }
+  const rmTag = t?.closest?.(".modal-trade-tag-remove");
+  if (rmTag && modalCurrentId) {
+    const modal = $("#modal");
+    if (modal && !modal.classList.contains("hidden")) {
+      const enc = rmTag.getAttribute("data-remove-tag");
+      if (enc == null) return;
+      let tag;
+      try {
+        tag = decodeURIComponent(enc);
+      } catch {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      modalTradeTagsDraft = modalTradeTagsDraft.filter((x) => x !== tag);
+      renderModalTradeTagChips();
+      return;
+    }
+  }
+  if (t?.closest?.("#modal-trade-tag-add-btn") && modalCurrentId) {
+    const modal = $("#modal");
+    if (modal && !modal.classList.contains("hidden")) {
+      e.preventDefault();
+      addModalTradeTagFromInput();
+      return;
+    }
+  }
   if (t?.closest?.("#calendar-day-note-save")) {
     e.preventDefault();
     saveCalendarDayNoteFromModal();
@@ -3389,6 +3627,18 @@ document.addEventListener("click", (e) => {
   }
 });
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    if (e.target?.id === "modal-import-tag-add") {
+      e.preventDefault();
+      addModalImportTagFromInput();
+      return;
+    }
+    if (e.target?.id === "modal-trade-tag-add") {
+      e.preventDefault();
+      addModalTradeTagFromInput();
+      return;
+    }
+  }
   if (e.key === "Enter" || e.key === " ") {
     const th = e.target?.closest?.("th[data-trade-sort]");
     if (th) {

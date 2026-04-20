@@ -220,6 +220,34 @@ export async function apiCreateImport(broker, tags, filename, accountId = null) 
     return data ?? null;
 }
 
+export async function apiUpdateImportTags(importId, tags) {
+    const res = await fetchWithRefresh(
+        `${API}/api/imports/${encodeURIComponent(String(importId).trim())}`,
+        {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tags: tags ?? [] }),
+        },
+    );
+    const rawText = await res.text();
+    if (!res.ok) {
+        let msg = rawText.trim() || `Failed to update import (${res.status})`;
+        try {
+            const errBody = JSON.parse(rawText);
+            if (typeof errBody?.detail === "string") msg = errBody.detail;
+            else if (errBody?.detail != null) msg = JSON.stringify(errBody.detail);
+        } catch {
+            /* plain text body */
+        }
+        throw new Error(msg.slice(0, 800));
+    }
+    try {
+        return JSON.parse(rawText);
+    } catch {
+        return null;
+    }
+}
+
 export async function apiGetImports() {
     const res = await fetchWithRefresh(`${API}/api/imports`);
     const rawText = await res.text();
