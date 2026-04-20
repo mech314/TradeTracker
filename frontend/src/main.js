@@ -553,11 +553,10 @@ function normalizeTradeTagList(list) {
   const seen = new Set();
   const out = [];
   for (const raw of list || []) {
-    const s = String(raw || "").trim();
+    const s = String(raw || "").trim().toLowerCase();
     if (!s) continue;
-    const lc = s.toLowerCase();
-    if (seen.has(lc)) continue;
-    seen.add(lc);
+    if (seen.has(s)) continue;
+    seen.add(s);
     out.push(s);
   }
   return out;
@@ -2553,10 +2552,10 @@ function bind() {
       input.value = "";
       return;
     }
-    const accRow = tradingAccountById(uploadId);
+    const accRow = tradingAccountById(uploadId);  
     const broker = (accRow?.broker || "Other").trim() || "Other";
     const tagsRaw = $("#import-tags")?.value || "";
-    const tags = tagsRaw.split(",").map((t) => t.trim()).filter(Boolean);
+    const tags = tagsRaw.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
     const filename = [...files].map(f => f.name).join(", ");
 
     let importRecord;
