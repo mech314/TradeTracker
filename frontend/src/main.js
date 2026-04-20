@@ -934,12 +934,12 @@ function renderPnlHeatmapSectionHtml(byDayPnl, trades, year, yearOptions) {
   const labelCells = weekdayOneLetter
     .map(
       (ch) =>
-        `<span class="h-4 sm:h-5 flex items-center justify-end text-[10px] text-slate-600 tabular-nums leading-none pr-1">${ch}</span>`,
+        `<span class="aspect-square flex items-center justify-end text-[10px] text-slate-600 tabular-nums leading-none pr-0.5">${ch}</span>`,
     )
     .join("");
 
   const cellBox =
-    "block w-4 h-4 sm:w-5 sm:h-5 rounded-sm shrink-0 border border-slate-800/90 ";
+    "block aspect-square w-full rounded-sm border border-slate-800/90 ";
 
   const columns = [];
   for (const mon of weekMons) {
@@ -977,14 +977,14 @@ function renderPnlHeatmapSectionHtml(byDayPnl, trades, year, yearOptions) {
         `<span class="${box}" role="img" aria-label="${escapeAttr(tip)}" title="${escapeAttr(tip)}"></span>`,
       );
     }
-    columns.push(`<div class="flex flex-col gap-1 shrink-0">${cells.join("")}</div>`);
+    columns.push(`<div class="flex flex-col gap-[2px] min-w-0">${cells.join("")}</div>`);
   }
 
   const legendSwatches = (classes, sign) =>
     classes
       .map(
         (c) =>
-          `<span class="inline-block w-4 h-4 sm:w-5 sm:h-5 rounded-sm border border-slate-800/80 ${c}" title="${sign}"></span>`,
+          `<span class="inline-block w-3.5 h-3.5 rounded-sm border border-slate-800/80 ${c}" title="${sign}"></span>`,
       )
       .join("");
 
@@ -996,9 +996,9 @@ function renderPnlHeatmapSectionHtml(byDayPnl, trades, year, yearOptions) {
     .join("");
 
   const statCardSidebar = (label, valueHtml) => `
-    <div class="rounded-lg border border-slate-800/80 bg-surface-overlay/50 px-3 py-2.5 min-w-0">
-      <p class="text-[11px] font-medium text-slate-500 uppercase tracking-wide">${label}</p>
-      <p class="text-base sm:text-lg font-mono font-semibold tracking-tight mt-1 tabular-nums">${valueHtml}</p>
+    <div class="rounded-lg border border-slate-800/80 bg-surface-overlay/50 px-2 py-2 min-w-0">
+      <p class="text-[10px] font-medium text-slate-500 uppercase tracking-wide leading-tight">${label}</p>
+      <p class="text-sm font-mono font-semibold tracking-tight mt-0.5 tabular-nums">${valueHtml}</p>
     </div>`;
 
   return `
@@ -1010,14 +1010,14 @@ function renderPnlHeatmapSectionHtml(byDayPnl, trades, year, yearOptions) {
         <div class="min-w-0 w-full lg:flex-[2] lg:basis-0">
           <p class="text-xs text-slate-600 mb-2">Older weeks on the left · darker = larger |daily P&amp;L| within ${y}</p>
           <div class="flex gap-1.5 sm:gap-2 min-w-0">
-            <div class="flex flex-col gap-1 shrink-0 pt-px" aria-hidden="true">${labelCells}</div>
-            <div class="overflow-x-auto min-w-0 flex-1 overscroll-x-contain touch-pan-x pb-1 -mr-1 pr-1">
-              <div class="flex gap-1 w-max">${columns.join("")}</div>
+            <div class="flex flex-col gap-[2px] shrink-0 w-4 pt-px" aria-hidden="true">${labelCells}</div>
+            <div class="min-w-0 flex-1 pb-1">
+              <div class="grid w-full" style="grid-template-columns:repeat(${weekMons.length},minmax(0,1fr));gap:2px">${columns.join("")}</div>
             </div>
           </div>
           <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-3 text-[11px] text-slate-500">
             <span class="inline-flex items-center gap-1.5"><span class="text-slate-600">Loss</span> ${legendSwatches([...lossCls].reverse(), "loss")}</span>
-            <span class="inline-flex items-center gap-1.5"><span class="w-4 h-4 sm:w-5 sm:h-5 rounded-sm border border-slate-800/80 bg-slate-800/45 shrink-0" title="No trades"></span> No trades</span>
+            <span class="inline-flex items-center gap-1.5"><span class="w-3.5 h-3.5 rounded-sm border border-slate-800/80 bg-slate-800/45 shrink-0" title="No trades"></span> No trades</span>
             <span class="inline-flex items-center gap-1.5"><span class="text-slate-600">Gain</span> ${legendSwatches(gainCls, "gain")}</span>
           </div>
         </div>
@@ -1030,7 +1030,7 @@ function renderPnlHeatmapSectionHtml(byDayPnl, trades, year, yearOptions) {
               ${yearOpts}
             </select>
           </div>
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2.5">
+          <div class="grid grid-cols-3 gap-2">
             ${statCardSidebar("Worst day", `<span class="text-loss">${fmtStat(dayBw.worstDay)}</span>`)}
             ${statCardSidebar("Best day", `<span class="text-gain">${fmtStat(dayBw.bestDay)}</span>`)}
             ${statCardSidebar("Worst trade", `<span class="text-loss">${fmtStat(stats.biggestLoser)}</span>`)}
