@@ -942,6 +942,27 @@ function renderPnlHeatmapSectionHtml(byDayPnl, trades, year, yearOptions) {
     "block aspect-square w-full rounded-sm border border-slate-800/90 ";
 
   const columns = [];
+  const monthLabels = [];
+  {
+    let prevMonth = -1;
+    for (let ci = 0; ci < weekMons.length; ci++) {
+      const mon = weekMons[ci];
+      const m = mon.getMonth();
+      if (m !== prevMonth) {
+        if (mon.getFullYear() === y) {
+          monthLabels.push({ col: ci, label: mon.toLocaleString(undefined, { month: "short" }) });
+        }
+        prevMonth = m;
+      }
+    }
+  }
+  const totalCols = weekMons.length;
+  const monthLabelCells = monthLabels.map((ml, i) => {
+    const nextCol = i + 1 < monthLabels.length ? monthLabels[i + 1].col : totalCols;
+    const span = nextCol - ml.col;
+    return `<span class="text-[10px] text-slate-600 truncate" style="grid-column:${ml.col + 1}/span ${span}">${ml.label}</span>`;
+  }).join("");
+  const monthLabelRow = `<div class="grid min-w-0 w-full" style="grid-template-columns:repeat(${totalCols},minmax(0,1fr));gap:2px">${monthLabelCells}</div>`;
   for (const mon of weekMons) {
     const cells = [];
     for (let r = 0; r < 5; r++) {
@@ -1018,6 +1039,7 @@ function renderPnlHeatmapSectionHtml(byDayPnl, trades, year, yearOptions) {
       <div class="flex flex-col lg:flex-row lg:items-stretch lg:gap-6">
         <div class="min-w-0 w-full lg:flex-[2] lg:basis-0">
           <p class="text-xs text-slate-600 mb-2">Older weeks on the left · darker = larger |daily P&amp;L| within ${y}</p>
+          <div class="ml-5 mb-1">${monthLabelRow}</div>
           <div class="flex gap-1.5 sm:gap-2 min-w-0">
             <div class="flex flex-col gap-[2px] shrink-0 w-4 pt-px" aria-hidden="true">${labelCells}</div>
             <div class="min-w-0 flex-1 pb-1">
@@ -1430,7 +1452,7 @@ function accountPageHtml() {
 
             </div>
           <button type="button" id="delete-trades-btn"
-            class="px-4 py-2 rounded-lg bg-loss/15 text-loss text-sm border border-loss/30 hover:bg-loss/25 transition-colors">
+class="px-4 py-2 rounded-lg bg-loss/15 text-loss text-sm border border-loss/30 hover:bg-loss/25 transition-colors whitespace-nowrap">
             Delete all
           </button>
         </div>
