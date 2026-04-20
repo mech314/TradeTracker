@@ -995,15 +995,24 @@ function renderPnlHeatmapSectionHtml(byDayPnl, trades, year, yearOptions) {
     )
     .join("");
 
-  const statCardSidebar = (label, valueHtml) => `
-    <div class="rounded-lg border border-slate-800/80 bg-surface-overlay/50 px-2 py-2 min-w-0">
+    const statCardSidebar = (label, valueHtml) => `
+    <div class="rounded-lg border border-slate-800/80 bg-surface-overlay/50 px-3 py-3 min-w-0 flex flex-col items-center justify-center text-center">
       <p class="text-[10px] font-medium text-slate-500 uppercase tracking-wide leading-tight">${label}</p>
-      <p class="text-sm font-mono font-semibold tracking-tight mt-0.5 tabular-nums">${valueHtml}</p>
+      <p class="text-lg font-mono font-semibold tracking-tight mt-1 tabular-nums">${valueHtml}</p>
     </div>`;
 
   return `
     <section class="rounded-xl border border-slate-800 bg-surface-raised p-4 sm:p-5" aria-labelledby="pnl-heatmap-heading">
-      <h2 id="pnl-heatmap-heading" class="text-sm font-medium text-slate-400 mb-2">P&amp;L heatmap</h2>
+       <div class="flex items-center justify-between gap-3 mb-2">
+        <h2 id="pnl-heatmap-heading" class="text-sm font-medium text-slate-400">P&amp;L heatmap</h2>
+        <div class="flex items-center gap-2">
+          <label for="pnl-heatmap-year" class="text-xs font-medium text-slate-500 whitespace-nowrap">Year</label>
+          <select id="pnl-heatmap-year"
+            class="select-flat min-h-[40px] rounded-lg border border-slate-700 bg-surface px-2.5 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent/80 min-w-[5.5rem]">
+            ${yearOpts}
+          </select>
+        </div>
+      </div>
       <p class="text-[10px] text-slate-600 mb-4 lg:mb-5">Days: net P&amp;L on the calendar day. Trades: round trips closed in ${y}. Grid: daily net (Mon–Fri).</p>
 
       <div class="flex flex-col lg:flex-row lg:items-stretch lg:gap-6">
@@ -1023,13 +1032,6 @@ function renderPnlHeatmapSectionHtml(byDayPnl, trades, year, yearOptions) {
         </div>
 
         <div class="min-w-0 w-full lg:flex-1 lg:basis-0 mt-6 pt-6 border-t border-slate-800 lg:mt-0 lg:pt-0 lg:border-t-0 lg:border-l lg:pl-6">
-          <div class="flex items-center gap-2 mb-4">
-            <label for="pnl-heatmap-year" class="text-xs font-medium text-slate-500 whitespace-nowrap">Year</label>
-            <select id="pnl-heatmap-year"
-              class="select-flat min-h-[40px] rounded-lg border border-slate-700 bg-surface px-2.5 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent/80 min-w-[5.5rem] w-full max-w-[9rem]">
-              ${yearOpts}
-            </select>
-          </div>
           <div class="grid grid-cols-3 gap-2">
             ${statCardSidebar("Worst day", `<span class="text-loss">${fmtStat(dayBw.worstDay)}</span>`)}
             ${statCardSidebar("Best day", `<span class="text-gain">${fmtStat(dayBw.bestDay)}</span>`)}
