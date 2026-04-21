@@ -598,7 +598,7 @@ async def get_day_notes(user=Depends(get_current_user)):
     )
     return {r["date_key"]: r["note"] for r in res.data or []}
 
-@app.post("/api/day-notes")
+@app.put("/api/day-notes")
 async def put_day_notes(body: DayNoteUpsert, user=Depends(get_current_user)):
     uid = user.id
     dk = body.strip()
