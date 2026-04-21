@@ -3299,13 +3299,15 @@ function saveCalendarDayNoteFromModal() {
   const k = canonicalDateKey(calendarDayNoteModalDateKey);
   if (!k) return;
   const raw = $("#calendar-day-note-text")?.value ?? "";
-  const trimmed = raw.trim();
+  const trimmed = raw.replace(/\r\n/g, "\n").trim();
   if (!trimmed) {
     delete state.calendarDayNotes[k];
   } else {
-    state.calendarDayNotes[k] = raw.replace(/\r\n/g, "\n").trim();
+    state.calendarDayNotes[k] = trimmed;
   }
-  persistCalendarDayNotes();
+  apiPutDayNote(k, trimmed).catch((err) =>
+    console.error("Failed to save day note:", err),
+  );
   closeCalendarDayNoteModal();
   paintCalendar();
 }
@@ -3315,7 +3317,9 @@ function clearCalendarDayNoteFromModal() {
   const k = canonicalDateKey(calendarDayNoteModalDateKey);
   if (!k) return;
   delete state.calendarDayNotes[k];
-  persistCalendarDayNotes();
+  apiPutDayNote(k, "").catch((err) =>
+    console.error("Failed to clear day note:", err),
+  );
   closeCalendarDayNoteModal();
   paintCalendar();
 }

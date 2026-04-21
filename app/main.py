@@ -88,6 +88,9 @@ class TradingAccountCreate(BaseModel):
     label: str
     broker: Optional[str] = None
 
+class DayNoteUpsert(BaseModel):
+    notes: dict[str, str] = Field(default_factory=dict)
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
     try:
@@ -584,6 +587,36 @@ async def patch_import_tags(
     if not rows:
         raise HTTPException(status_code=404, detail="Import not found")
     return rows[0]
+
+@app.get("/api/day-notes")
+async def get_day_notes(user=Depends(get_current_user)):
+    res = (
+        supabase_admin.table("calendar_day_notes")
+        .select("date_key, note")
+        .eq("user_id", user.id)
+        .execute()
+    )
+    return {r["date_key"]: r["note"] for r in res.data or []}
+
+@app.post("/api/day-notes")
+async def put_day_notes(body: DayNoteUpsert, user=Depends(get_current_user)):
+    uid = user.id
+    dk = body.strip()
+    txt = (body.note or "").strip()
+    if not txt:
+        supabase_admin.table("calendar_day_notes").delete().eq("user_id", uid).eq("date_key", dk).execute()
+        return {"date_key": dk, "note": ""}
+    
+    sub = supabase_admin.table("calendar_day_notes").upsert({
+        "user_id": uid,
+        "date_key": dk,
+        "note": txt,
+    }).execute()
+    return {
+        "date_key": dk,
+        "note": txt,
+    }
+
 
 
 if STATIC.is_dir():

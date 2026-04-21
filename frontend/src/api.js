@@ -270,3 +270,19 @@ export async function apiGetImports() {
     }
     return Array.isArray(data) ? data : [];
 }
+
+export async function apiGetDayNotes() {
+    const res = await apiFetch("/api/day-notes");
+    if (!res.ok) throw new Error("Failed to fetch day notes");
+    return res.json();
+}
+
+export async function apiPutDayNote(dateKey, note) {
+    const res = await apiFetch(`/api/day-notes/${encodeURIComponent(dateKey)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    });
+    if (!res.ok) throw new Error("Failed to save day note");
+    return res.json();
+  }
