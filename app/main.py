@@ -88,8 +88,9 @@ class TradingAccountCreate(BaseModel):
     label: str
     broker: Optional[str] = None
 
-class DayNoteUpsert(BaseModel):
-    notes: dict[str, str] = Field(default_factory=dict)
+class DayNotePutBody(BaseModel):
+    note: str = ""
+
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
@@ -590,33 +591,59 @@ async def patch_import_tags(
 
 @app.get("/api/day-notes")
 async def get_day_notes(user=Depends(get_current_user)):
-    res = (
-        supabase_admin.table("calendar_day_notes")
-        .select("date_key, note")
-        .eq("user_id", user.id)
-        .execute()
-    )
-    return {r["date_key"]: r["note"] for r in res.data or []}
+    uid = str(user.id)
+    try:
+        res = (
+            supabase_admin.table("calendar_day_notes")
+            .select("date_key, note")
+            .eq("user_id", uid)
+            .execute()
+        )
+        rows = res.data or []
+        return {r["date_key"]: r.get("note") or "" for r in rows}
+    except Exception as e:
+        logger.exception("GET /api/day-notes failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not load day notes: {e!s}",
+        ) from e
 
-@app.put("/api/day-notes")
-async def put_day_notes(body: DayNoteUpsert, user=Depends(get_current_user)):
-    uid = user.id
-    dk = body.strip()
+
+@app.put("/api/day-notes/{date_key}")
+async def put_day_note(
+    date_key: str,
+    body: DayNotePutBody,
+    user=Depends(get_current_user),
+):
+    """Create/update or clear (empty body.note) a calendar day note."""
+    uid = str(user.id)
+    dk = str(date_key).strip()[:10]
+    if len(dk) != 10 or dk[4] != "-" or dk[7] != "-":
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid date_key (expected YYYY-MM-DD)",
+        )
     txt = (body.note or "").strip()
-    if not txt:
-        supabase_admin.table("calendar_day_notes").delete().eq("user_id", uid).eq("date_key", dk).execute()
-        return {"date_key": dk, "note": ""}
-    
-    sub = supabase_admin.table("calendar_day_notes").upsert({
-        "user_id": uid,
-        "date_key": dk,
-        "note": txt,
-    }).execute()
-    return {
-        "date_key": dk,
-        "note": txt,
-    }
-
+    try:
+        if not txt:
+            supabase_admin.table("calendar_day_notes").delete().eq(
+                "user_id", uid
+            ).eq("date_key", dk).execute()
+            return {"date_key": dk, "note": ""}
+        supabase_admin.table("calendar_day_notes").upsert(
+            {
+                "user_id": uid,
+                "date_key": dk,
+                "note": txt,
+            }
+        ).execute()
+        return {"date_key": dk, "note": txt}
+    except Exception as e:
+        logger.exception("PUT /api/day-notes/%s failed", dk)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not save day note: {e!s}",
+        ) from e
 
 
 if STATIC.is_dir():

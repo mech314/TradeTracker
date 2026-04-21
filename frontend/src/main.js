@@ -2306,6 +2306,18 @@ function hasScreenshotStored(meta) {
   return false;
 }
 
+async function hydrateCalendarDayNotes() {
+  try {
+    const server = await apiGetDayNotes();
+    if (server && typeof server === "object" && !Array.isArray(server)) {
+      state.calendarDayNotes = { ...state.calendarDayNotes, ...server };
+      persistCalendarDayNotes();
+    }
+  } catch (err) {
+    console.error("Failed to load day notes:", err);
+  }
+}
+
 async function hydrateTradeMeta() {
   revokeAllScreenshotUrls();
   state.tradeMetaById.clear();
@@ -2632,6 +2644,7 @@ function bind() {
     }
     state.fileLoadInfo = { fileCount: parts.length, fillCount: fills.length };
     await hydrateTradeMeta();
+    await hydrateCalendarDayNotes();
     state.metrics = computeMetrics(state.trades);
     try {
       state.imports = await apiGetImports();
@@ -3307,6 +3320,7 @@ function saveCalendarDayNoteFromModal() {
   } else {
     state.calendarDayNotes[k] = trimmed;
   }
+  persistCalendarDayNotes();
   apiPutDayNote(k, trimmed).catch((err) =>
     console.error("Failed to save day note:", err),
   );
@@ -3319,6 +3333,7 @@ function clearCalendarDayNoteFromModal() {
   const k = canonicalDateKey(calendarDayNoteModalDateKey);
   if (!k) return;
   delete state.calendarDayNotes[k];
+  persistCalendarDayNotes();
   apiPutDayNote(k, "").catch((err) =>
     console.error("Failed to clear day note:", err),
   );
@@ -3789,6 +3804,7 @@ if (!isPasswordRecovery) {
           state.balanceSnapshots = [];
         }
         await hydrateTradeMeta();
+        await hydrateCalendarDayNotes();
         render();
       })
       .catch((err) => {
