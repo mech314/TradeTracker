@@ -48,6 +48,8 @@ import {
   apiCreateTradingAccount,
   apiDeleteTradingAccount,
   apiBackfillTradingAccounts,
+  apiGetDayNotes,
+  apiPutDayNote,
 } from "./api.js";
 import Fuse from "fuse.js";
 
