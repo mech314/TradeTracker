@@ -3,6 +3,12 @@ import { splitCSVLine, parseMoney, coerceNumber } from "./csv.js";
 const LINE_RE = /^(\d{1,2}\/\d{1,2}\/\d{2}),(\d{2}:\d{2}:\d{2}),(TRD|BAL),/;
 const TRADE_DESC_RE = /^(BOT|SOLD)\s+([+-]?\d+)\s+(\S+)\s@([\d.]+)/;
 
+/**
+ * Schwab journal date/time strings → Unix ms.
+ * Interpreted as **local wall clock** in the browser (same as `formatTradeClock` / calendar cells).
+ * Keep your OS timezone aligned with how the broker exports times (usually your account locale,
+ * e.g. Mountain). If your CSV used Eastern-only timestamps without conversion, times would be wrong.
+ */
 function parseTs(dateStr, timeStr) {
   const [m, d, y] = dateStr.split("/").map(Number);
   const fullY = y < 50 ? 2000 + y : 1900 + y;
@@ -10,12 +16,37 @@ function parseTs(dateStr, timeStr) {
   return new Date(fullY, m - 1, d, hh, mm, ss || 0).getTime();
 }
 
+/** Calendar day key `YYYY-MM-DD` in **local** timezone — labels trades & Polygon `from`/`to` dates. */
 function calendarKey(ts) {
   const x = new Date(ts);
   const y = x.getFullYear();
   const mo = String(x.getMonth() + 1).padStart(2, "0");
   const da = String(x.getDate()).padStart(2, "0");
   return `${y}-${mo}-${da}`;
+}
+
+/** VWAP of legs that add to the opening position (same direction as final open side). */
+export function computeAverageEntryPriceFromFills(bucket, openSide) {
+  if (!bucket?.length) return null;
+  const sign = String(openSide ?? "").toUpperCase().startsWith("L") ? 1 : -1;
+  let q = 0;
+  let sumPxQty = 0;
+  let sumQty = 0;
+  for (const leg of bucket) {
+    const prevAbs = Math.abs(q);
+    q += leg.qtyDelta;
+    const abs = Math.abs(q);
+    const openingLeg = Math.sign(leg.qtyDelta) === sign;
+    const addsPosition =
+      openingLeg && (abs > prevAbs || (prevAbs === 0 && abs > 0));
+    if (addsPosition) {
+      const dq = Math.abs(leg.qtyDelta);
+      sumPxQty += dq * leg.price;
+      sumQty += dq;
+    }
+  }
+  if (sumQty <= 0) return bucket[0]?.price != null ? Number(bucket[0].price) : null;
+  return sumPxQty / sumQty;
 }
 
 /**
@@ -115,6 +146,7 @@ export function buildRoundTripTrades(fills, userId) {
           }
           const shareTurnover = sumAbsQtyDelta / 2;
           const openSide = first.qtyDelta > 0 ? "LONG" : "SHORT";
+          const openPrice = computeAverageEntryPriceFromFills(bucket, openSide);
           trades.push({
             id: tradeId(symbol, first.ts, last.ts, bucket.length, userId),
             symbol,
@@ -123,6 +155,7 @@ export function buildRoundTripTrades(fills, userId) {
             openTs: first.ts,
             closeTs: last.ts,
             pnl,
+            openPrice,
             fills: bucket.slice(),
             twoWayNotional,
             maxShares: maxAbsQty,
@@ -149,6 +182,41 @@ export function buildRoundTripTrades(fills, userId) {
 
 export function tradeId(symbol, openTs, closeTs, nLegs, userId) {
   return `${symbol}|${openTs}|${closeTs}|${nLegs}|${userId}`;
+}
+
+/** Fill count embedded in `tradeId` (bucket length when the trade was built). */
+export function roundTripFillCountFromId(tradeId) {
+  const parts = String(tradeId || "").split("|");
+  const n = Number(parts[3]);
+  return Number.isFinite(n) && n >= 1 ? n : null;
+}
+
+/**
+ * When `open_price` was never stored (older imports), infer VWAP entry for a **two-fill**
+ * round trip from notional and P&amp;L (algebraically exact for flat size in/out).
+ */
+export function inferOpenPriceFromStoredRoundTrip(trade) {
+  if (!trade) return null;
+  if (roundTripFillCountFromId(trade.id) !== 2) return null;
+  const Q = Number(trade.maxShares);
+  const tw = Number(trade.twoWayNotional);
+  const pnl = Number(trade.pnl);
+  if (!Number.isFinite(Q) || Q <= 0 || !Number.isFinite(tw) || tw <= 0 || !Number.isFinite(pnl))
+    return null;
+  const long = String(trade.openSide || "").toUpperCase().startsWith("L");
+  const half = pnl / (2 * Q);
+  const mid = tw / Q;
+  const inferred = long ? mid - half : mid + half;
+  if (!Number.isFinite(inferred) || inferred <= 0) return null;
+  return inferred;
+}
+
+/** Prefer persisted VWAP; otherwise infer for eligible two-fill trades. */
+export function effectiveOpenPrice(trade) {
+  const op = Number(trade?.openPrice);
+  if (Number.isFinite(op) && op > 0) return op;
+  const inferred = inferOpenPriceFromStoredRoundTrip(trade);
+  return Number.isFinite(inferred) && inferred > 0 ? inferred : null;
 }
 
 export function buildEquitySeries(balancePoints) {

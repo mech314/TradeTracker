@@ -32,6 +32,12 @@ export function emptyTradeMeta(id) {
     id,
     notes: "",
     riskPerShare: null,
+    /** Max adverse excursion ($), manual. */
+    mae: null,
+    /** Max favorable excursion ($), manual. */
+    mfe: null,
+    /** manual | polygon_auto */
+    maeMfeSource: null,
     hasScreenshot: false,
     updatedAt: null,
     screenshot: null,

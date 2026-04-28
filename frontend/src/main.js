@@ -4,13 +4,22 @@ import {
   extractFillsAndBalances,
   buildRoundTripTrades,
   buildEquitySeries,
+  effectiveOpenPrice,
 } from "./engine.js";
+import {
+  computeMaeMfeDollars,
+  formatDateYMDLocal,
+  shouldSkipPolygonIncompleteClose,
+  POLYGON_THROTTLE_MS,
+} from "./polygonMaeMfe.js";
 import { coerceNumber } from "./csv.js";
 import {
   computeMetrics,
   formatPct,
   formatUsd,
   canonicalDateKey,
+  tradePnlNumber,
+  coercePnl,
 } from "./metrics.js";
 import {
   renderEquityChart,
@@ -18,6 +27,18 @@ import {
   renderWeekdayChart,
   destroyChart,
 } from "./charts.js";
+import {
+  buildPlotsExplorerHtml,
+  paintPlotExplorer,
+  readPlotLayoutFromStorage,
+  persistPlotLayout,
+  normalizePlotLayout,
+  clampPlotSlot,
+  defaultHistogramPlot,
+  defaultDatasetScatter,
+  defaultDatasetHistogram,
+  parseTimeInputToMinutes,
+} from "./plots.js";
 import {
   emptyTradeMeta,
   blobToDataUrl,
@@ -50,6 +71,9 @@ import {
   apiBackfillTradingAccounts,
   apiGetDayNotes,
   apiPutDayNote,
+  apiPolygonMinuteAggs,
+  apiGetPolygonSettings,
+  apiPutPolygonSettings,
 } from "./api.js";
 import Fuse from "fuse.js";
 
@@ -138,6 +162,7 @@ const Page = Object.freeze({
   Dashboard: "dashboard",
   Calendar: "calendar",
   TradeImport: "trade-import",
+  Plots: "plots",
 });
 
 const ALL_PAGE_IDS = Object.freeze(Object.values(Page));
@@ -147,6 +172,7 @@ const LS_DISPLAY_ACCOUNT = "tradetracker_display_account_id";
 const LS_DASHBOARD_TAGS = "tradetracker_dashboard_tags";
 const LS_TRADE_TABLE_SORT = "tradetracker_trades_table_sort";
 const LS_CALENDAR_DAY_NOTES = "tradetracker_calendar_day_notes";
+const LS_POLYGON_API_KEY_LEGACY = "tradetracker_polygon_api_key";
 
 function readCalendarDayNotesFromStorage() {
   try {
@@ -192,6 +218,8 @@ const TRADE_TABLE_SORT_COLUMNS = new Set([
   "riskPerShare",
   "totalRisk",
   "rr",
+  "mae",
+  "mfe",
   "pnl",
   "result",
   "notesMeta",
@@ -285,6 +313,10 @@ let state = {
   /** Dashboard + calendar: filter to imports that have any of these strategy tags (OR). */
   dashboardTagFilters: readDashboardTagFiltersFromStorage(),
   filesLabel: "No files loaded",
+  /** Background Polygon MAE/MFE queue: { cur: number, total: number } | null */
+  polygonMaeMfeJob: null,
+  /** Server has a Polygon API key saved (GET /api/polygon/settings). */
+  polygonKeyConfigured: false,
   /** Set when CSVs are loaded: used to refresh the status line after deleting trades. */
   fileLoadInfo: null,
   calendarMonth: new Date(),
@@ -299,6 +331,8 @@ let state = {
   tradeTableSort: readTradeTableSortFromStorage(),
   /** Per calendar day (YYYY-MM-DD) free-form notes; localStorage only. */
   calendarDayNotes: readCalendarDayNotesFromStorage(),
+  /** Custom chart grid layout (persisted). */
+  plotLayout: readPlotLayoutFromStorage(),
 };
 
 let metaPopoverHideTimer = null;
@@ -538,6 +572,220 @@ function tradeMatchesAllDashboardTags(trade, importsScope, wantMatchKeys) {
   }
   const combined = new Set(keys);
   return wantMatchKeys.every((w) => combined.has(w));
+}
+
+/**
+ * Split plot series tag filter: commas and/or whitespace between tokens.
+ * `#scenario3 #touch1` and `#scenario3, touch1` both yield two AND tags; comma-only was wrong for space-separated tags.
+ */
+function parsePlotSeriesTags(tagsCsv) {
+  const out = [];
+  for (const chunk of String(tagsCsv ?? "").split(",")) {
+    const c = chunk.trim();
+    if (!c) continue;
+    for (const piece of c.split(/\s+/)) {
+      const p = piece.trim();
+      if (p) out.push(p);
+    }
+  }
+  return out;
+}
+
+/** Per-series tag AND filter on Plots page (import ∪ per-trade tags). Empty = all scoped trades. */
+function tradesForPlotSeries(trades, importsScope, tagsCsv) {
+  const parts = parsePlotSeriesTags(tagsCsv);
+  if (!parts.length) return trades.slice();
+  const keys = parts.map((t) => tagKeyForMatch(t)).filter(Boolean);
+  if (!keys.length) return trades.slice();
+  return trades.filter((tr) =>
+    tradeMatchesAllDashboardTags(tr, importsScope, keys),
+  );
+}
+
+function applyPlotChartType(slotIdx, chartType) {
+  const cur = state.plotLayout.plots[slotIdx];
+  if (!cur) return;
+  const preserved = (cur.datasets || []).map((d) => ({
+    label: d.label,
+    color: d.color,
+    tags: d.tags,
+  }));
+  if (chartType === "histogram") {
+    state.plotLayout.plots[slotIdx] = clampPlotSlot(
+      {
+        chartType: "histogram",
+        valueKey: "pnl",
+        bins: 20,
+        histAgg: "count",
+        valueLog: false,
+        freqLog: false,
+        datasets:
+          preserved.length > 0 ? preserved : defaultHistogramPlot().datasets,
+      },
+      slotIdx,
+    );
+  } else {
+    state.plotLayout.plots[slotIdx] = clampPlotSlot(
+      {
+        chartType: "scatter",
+        xKey: "openTs",
+        yKey: "pnl",
+        xLog: false,
+        yLog: false,
+        datasets:
+          preserved.length > 0 ? preserved : [defaultDatasetScatter()],
+      },
+      slotIdx,
+    );
+  }
+}
+
+function syncPlotSlotControl(slotIdx, el) {
+  const prop = el.dataset.plotProp;
+  if (!prop) return;
+  const cur = state.plotLayout.plots[slotIdx];
+  let next = { ...cur };
+  if (prop === "sessionStartTime" || prop === "sessionEndTime") {
+    if (el instanceof HTMLInputElement && el.type === "time") {
+      const mins = parseTimeInputToMinutes(el.value);
+      if (Number.isFinite(mins)) {
+        if (prop === "sessionStartTime") next.sessionStartMinutes = mins;
+        else next.sessionEndMinutes = mins;
+      }
+    }
+  } else if (el instanceof HTMLInputElement && el.type === "checkbox") {
+    next[prop] = el.checked;
+  } else if (el instanceof HTMLInputElement && el.type === "number") {
+    next[prop] = Number(el.value);
+  } else {
+    next[prop] = el.value;
+  }
+  state.plotLayout.plots[slotIdx] = clampPlotSlot(next, slotIdx);
+}
+
+function syncPlotDataset(slotIdx, dsIdx, el) {
+  const prop = el.dataset.plotDsProp;
+  if (!prop) return;
+  const p = state.plotLayout.plots[slotIdx];
+  const ds = [...p.datasets];
+  if (!ds[dsIdx]) return;
+  let val = el.value;
+  if (el instanceof HTMLInputElement && el.type === "color") {
+    val = el.value;
+  }
+  ds[dsIdx] = { ...ds[dsIdx], [prop]: val };
+  state.plotLayout.plots[slotIdx] = clampPlotSlot({ ...p, datasets: ds }, slotIdx);
+}
+
+function handlePlotExplorerChange(e) {
+  const t = e.target;
+  if (!(t instanceof HTMLElement)) return false;
+
+  if (t.id === "plot-grid-count") {
+    const n = Math.min(12, Math.max(1, Number(t.value) || 1));
+    state.plotLayout = normalizePlotLayout({
+      ...state.plotLayout,
+      gridCount: n,
+      plots: state.plotLayout.plots,
+    });
+    persistPlotLayout(state.plotLayout);
+    render();
+    return true;
+  }
+  if (t.id === "plot-grid-cols") {
+    state.plotLayout.cols = Math.min(4, Math.max(1, Number(t.value) || 2));
+    persistPlotLayout(state.plotLayout);
+    render();
+    return true;
+  }
+
+  const slotRoot = t.closest("[data-plot-slot]");
+  if (!slotRoot || !t.closest("#plots-explorer")) return false;
+  const slotIdx = Number(slotRoot.dataset.plotSlot);
+  if (!Number.isFinite(slotIdx)) return false;
+
+  if (t.dataset.plotProp === "chartType" && t instanceof HTMLSelectElement) {
+    applyPlotChartType(slotIdx, t.value);
+    persistPlotLayout(state.plotLayout);
+    render();
+    return true;
+  }
+  if (t.dataset.plotProp) {
+    syncPlotSlotControl(slotIdx, t);
+    persistPlotLayout(state.plotLayout);
+    render();
+    return true;
+  }
+  const dsRow = t.closest("[data-plot-dataset-row]");
+  if (dsRow && t.dataset.plotDsProp) {
+    const dsi = Number(dsRow.dataset.dsIndex);
+    syncPlotDataset(slotIdx, dsi, t);
+    persistPlotLayout(state.plotLayout);
+    render();
+    return true;
+  }
+  return false;
+}
+
+function handlePlotExplorerInput(e) {
+  const t = e.target;
+  if (!(t instanceof HTMLElement)) return false;
+  if (!t.closest("#plots-explorer")) return false;
+  const slotRoot = t.closest("[data-plot-slot]");
+  if (!slotRoot) return false;
+  const slotIdx = Number(slotRoot.dataset.plotSlot);
+  if (!Number.isFinite(slotIdx)) return false;
+
+  if (t.dataset.plotDsProp) {
+    const dsRow = t.closest("[data-plot-dataset-row]");
+    const dsi = Number(dsRow?.dataset.dsIndex);
+    if (!Number.isFinite(dsi)) return false;
+    syncPlotDataset(slotIdx, dsi, t);
+    if (t.dataset.plotDsProp === "tags" && t.hasAttribute("data-plot-tag-input")) {
+      updatePlotTagSuggestions(t);
+    }
+    schedulePlotsPersistAndRepaint();
+    return true;
+  }
+  if (
+    t.dataset.plotProp &&
+    t instanceof HTMLInputElement &&
+    (t.type === "number" || t.type === "time")
+  ) {
+    syncPlotSlotControl(slotIdx, t);
+    schedulePlotsPersistAndRepaint();
+    return true;
+  }
+  return false;
+}
+
+function paintPlots() {
+  if (!isActivePage(Page.Plots)) return;
+  const root = $("#plots-explorer");
+  if (!root) return;
+  const { tradesView } = dashboardScope();
+  const importsScope = importsInDisplayScope(
+    state.imports,
+    state.displayAccountId,
+  );
+  paintPlotExplorer(
+    root,
+    tradesView,
+    state.plotLayout,
+    (trades, tagsCsv) => tradesForPlotSeries(trades, importsScope, tagsCsv),
+    (id) => tradeMeta(id),
+  );
+}
+
+let plotExplorerInputTimer = null;
+
+/** Persist + repaint charts only — avoids full `render()` while typing in plot controls. */
+function schedulePlotsPersistAndRepaint() {
+  clearTimeout(plotExplorerInputTimer);
+  plotExplorerInputTimer = setTimeout(() => {
+    persistPlotLayout(state.plotLayout);
+    paintPlots();
+  }, 200);
 }
 
 /** Tags from the CSV import row linked to this trade. */
@@ -783,8 +1031,7 @@ function cumulativePnlDailySeries(trades, monthFilter) {
   for (const t of list) {
     const k = canonicalDateKey(t.dateKey);
     if (!k) continue;
-    const p = Number.isFinite(t.pnl) ? t.pnl : 0;
-    pnlByDay.set(k, (pnlByDay.get(k) || 0) + p);
+    pnlByDay.set(k, (pnlByDay.get(k) || 0) + tradePnlNumber(t));
   }
   const dayKeys = [...pnlByDay.keys()].sort();
   let run = 0;
@@ -849,11 +1096,11 @@ function pnlHeatmapYearOptions(trades) {
 function pnlTradeStatsForYear(trades, year) {
   const inYear = trades.filter((t) => dateKeyYear(t.dateKey) === year);
   const winPnls = inYear
-    .filter((t) => Number.isFinite(t.pnl) && t.pnl > 0)
-    .map((t) => t.pnl);
+    .filter((t) => tradePnlNumber(t) > 0)
+    .map((t) => tradePnlNumber(t));
   const lossPnls = inYear
-    .filter((t) => Number.isFinite(t.pnl) && t.pnl < 0)
-    .map((t) => t.pnl);
+    .filter((t) => tradePnlNumber(t) < 0)
+    .map((t) => tradePnlNumber(t));
   return {
     biggestWinner: winPnls.length ? Math.max(...winPnls) : null,
     biggestLoser: lossPnls.length ? Math.min(...lossPnls) : null,
@@ -1088,8 +1335,8 @@ function dayStats(trades, dateKey) {
   const dayTrades = trades.filter(
     (t) => canonicalDateKey(t.dateKey) === dateKey,
   );
-  const pnl = dayTrades.reduce((s, t) => s + t.pnl, 0);
-  const wins = dayTrades.filter((t) => t.win).length;
+  const pnl = dayTrades.reduce((s, t) => s + tradePnlNumber(t), 0);
+  const wins = dayTrades.filter((t) => tradePnlNumber(t) > 0).length;
   const losses = dayTrades.length - wins;
   return { pnl, wins, losses, count: dayTrades.length };
 }
@@ -1098,31 +1345,201 @@ function weekStats(trades, dateKeys) {
   const weekTrades = trades.filter((t) =>
     dateKeys.includes(canonicalDateKey(t.dateKey)),
   );
-  const pnl = weekTrades.reduce((s, t) => s + t.pnl, 0);
-  const wins = weekTrades.filter((t) => t.win).length;
+  const pnl = weekTrades.reduce((s, t) => s + tradePnlNumber(t), 0);
+  const wins = weekTrades.filter((t) => tradePnlNumber(t) > 0).length;
   const losses = weekTrades.length - wins;
   const grossProfit = weekTrades
-    .filter((t) => t.pnl > 0)
-    .reduce((s, t) => s + t.pnl, 0);
+    .filter((t) => tradePnlNumber(t) > 0)
+    .reduce((s, t) => s + tradePnlNumber(t), 0);
   const grossLossAbs = Math.abs(
-    weekTrades.filter((t) => t.pnl < 0).reduce((s, t) => s + t.pnl, 0),
+    weekTrades
+      .filter((t) => tradePnlNumber(t) < 0)
+      .reduce((s, t) => s + tradePnlNumber(t), 0),
   );
   let profitFactor = null;
   if (grossLossAbs > 0) profitFactor = grossProfit / grossLossAbs;
   else if (grossProfit > 0) profitFactor = Infinity;
-  else profitFactor = Infinity;
 
   const winRate = weekTrades.length ? wins / weekTrades.length : null;
   return { pnl, wins, losses, profitFactor, winRate, tradeCount: weekTrades.length };
 }
 
-function formatCompactUsd(x) {
-  if (x == null || !Number.isFinite(x)) return "—";
-  const sign = x < 0 ? "-" : "";
-  return `${sign}$${Math.abs(x).toFixed(2)}`;
+/** Trades table + sort: MAE/MFE from manual meta (dollars, ≥0). */
+function formatMetaExcursionUsd(v) {
+  if (v == null || v === "") return "—";
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) return "—";
+  return formatUsd(n);
 }
 
-/** P&amp;L ÷ total risk when total risk &gt; 0; otherwise null. */
+function metaExcursionSortValue(meta, key) {
+  const v = meta?.[key];
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+let polygonThrottleLast = 0;
+/** Snapshot of MAE/MFE input strings when modal opened — detects manual edits vs Polygon. */
+let modalMetaSnapshot = null;
+
+async function throttlePolygonBeforeRequest() {
+  const now = Date.now();
+  const wait = Math.max(0, POLYGON_THROTTLE_MS - (now - polygonThrottleLast));
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  polygonThrottleLast = Date.now();
+}
+
+function tradeCanPolygonAuto(trade) {
+  if (
+    !trade?.symbol ||
+    !Number.isFinite(trade.openTs) ||
+    !Number.isFinite(trade.closeTs) ||
+    !trade.openSide
+  ) {
+    return false;
+  }
+  const op = effectiveOpenPrice(trade);
+  if (!Number.isFinite(op) || op <= 0) return false;
+  const ms = Number(trade.maxShares);
+  if (!Number.isFinite(ms) || ms <= 0) return false;
+  if (shouldSkipPolygonIncompleteClose(trade.closeTs)) return false;
+  return true;
+}
+
+async function refreshPolygonKeyState() {
+  if (!isLoggedIn()) {
+    state.polygonKeyConfigured = false;
+    return;
+  }
+  try {
+    const r = await apiGetPolygonSettings();
+    state.polygonKeyConfigured = !!r?.has_key;
+  } catch {
+    state.polygonKeyConfigured = false;
+  }
+}
+
+async function migratePolygonKeyLegacyOnce() {
+  try {
+    if (state.polygonKeyConfigured) return;
+    const legacy = (localStorage.getItem(LS_POLYGON_API_KEY_LEGACY) || "").trim();
+    if (!legacy) return;
+    await apiPutPolygonSettings(legacy);
+    localStorage.removeItem(LS_POLYGON_API_KEY_LEGACY);
+    await refreshPolygonKeyState();
+  } catch (e) {
+    console.warn("Polygon key migration from localStorage skipped:", e);
+  }
+}
+
+function polygonHasKey() {
+  return !!state.polygonKeyConfigured;
+}
+
+async function applyPolygonMaeMfeToTrade(tradeId, options = {}) {
+  const force = options.force === true;
+  if (!polygonHasKey()) return { ok: false, reason: "no_key" };
+
+  const trade = state.trades.find((x) => x.id === tradeId);
+  if (!trade) return { ok: false, reason: "no_trade" };
+
+  const meta = state.tradeMetaById.get(tradeId) || emptyTradeMeta(tradeId);
+  if (
+    !force &&
+    meta.maeMfeSource === "manual" &&
+    (meta.mae != null || meta.mfe != null)
+  ) {
+    return { ok: false, reason: "manual" };
+  }
+
+  if (!tradeCanPolygonAuto(trade)) return { ok: false, reason: "not_eligible" };
+
+  const fromDate = formatDateYMDLocal(trade.openTs);
+  const toDate = formatDateYMDLocal(trade.closeTs);
+
+  await throttlePolygonBeforeRequest();
+  let json;
+  try {
+    json = await apiPolygonMinuteAggs(trade.symbol, fromDate, toDate);
+  } catch (e) {
+    console.error(e);
+    return { ok: false, reason: "fetch", error: e };
+  }
+
+  const raw = json?.results ?? [];
+  const computed = computeMaeMfeDollars(
+    trade.openTs,
+    trade.closeTs,
+    trade.openSide,
+    effectiveOpenPrice(trade),
+    Number(trade.maxShares),
+    raw,
+  );
+  if (!computed) return { ok: false, reason: "no_bars" };
+
+  await apiUpsertMeta({
+    id: tradeId,
+    notes: meta.notes ?? null,
+    riskPerShare: meta.riskPerShare ?? null,
+    mae: computed.mae,
+    mfe: computed.mfe,
+    maeMfeSource: "polygon_auto",
+    screenshotUrl: meta.screenshotUrl ?? null,
+    tags: tradeMetaTagsNormalized(meta),
+  });
+
+  state.tradeMetaById.set(tradeId, {
+    ...emptyTradeMeta(tradeId),
+    ...meta,
+    mae: computed.mae,
+    mfe: computed.mfe,
+    maeMfeSource: "polygon_auto",
+  });
+  return { ok: true };
+}
+
+async function runPolygonMaeMfeBulk(tradeIds) {
+  if (!polygonHasKey() || !tradeIds?.length) return;
+  state.polygonMaeMfeJob = { cur: 0, total: tradeIds.length };
+  render();
+  for (let i = 0; i < tradeIds.length; i++) {
+    state.polygonMaeMfeJob = { cur: i + 1, total: tradeIds.length };
+    render();
+    await applyPolygonMaeMfeToTrade(tradeIds[i], { force: false });
+  }
+  state.polygonMaeMfeJob = null;
+  render();
+}
+
+function tradeIdsEligibleForPolygonBulk() {
+  if (!polygonHasKey()) return [];
+  const out = [];
+  for (const t of state.trades) {
+    if (!tradeCanPolygonAuto(t)) continue;
+    const m = state.tradeMetaById.get(t.id);
+    if (m?.maeMfeSource === "manual") continue;
+    if (m?.mae != null || m?.mfe != null) continue;
+    out.push(t.id);
+  }
+  return out;
+}
+
+async function maybeAutoPolygonAfterModalSave(tradeId) {
+  if (!tradeId || !polygonHasKey()) return;
+  const m = state.tradeMetaById.get(tradeId);
+  if (!m) return;
+  if (m.mae != null || m.mfe != null) return;
+  if (m.maeMfeSource === "manual") return;
+  const t = state.trades.find((x) => x.id === tradeId);
+  if (!t || !tradeCanPolygonAuto(t)) return;
+  state.polygonMaeMfeJob = { cur: 1, total: 1 };
+  render();
+  await applyPolygonMaeMfeToTrade(tradeId, { force: false });
+  state.polygonMaeMfeJob = null;
+  render();
+}
+
 function tradeRiskRewardMultiple(t, meta) {
   const rps = meta.riskPerShare;
   const rpsNum =
@@ -1131,10 +1548,10 @@ function tradeRiskRewardMultiple(t, meta) {
       : null;
   const totalRisk =
     rpsNum != null && t.maxShares > 0 ? rpsNum * t.maxShares : null;
-  if (totalRisk == null || totalRisk <= 0 || !Number.isFinite(t.pnl)) {
+  if (totalRisk == null || totalRisk <= 0 || !Number.isFinite(tradePnlNumber(t))) {
     return null;
   }
-  return t.pnl / totalRisk;
+  return tradePnlNumber(t) / totalRisk;
 }
 
 /** Inner HTML for R:R cell in the trade table. */
@@ -1206,8 +1623,10 @@ function tradeRowHtml(t) {
       </td>
       <td class="px-3 py-2 text-right font-mono text-sm" data-risk-total="${escapeAttr(t.id)}">${totalInner}</td>
       <td class="px-3 py-2 text-right font-mono text-sm" data-rr="${escapeAttr(t.id)}">${riskRewardCellInnerHtml(t, meta)}</td>
-      <td class="px-3 py-2 text-right font-mono ${t.pnl > 0 ? "text-gain" : "text-loss"}">${formatUsd(t.pnl)}</td>
-      <td class="px-3 py-2">${t.win ? '<span class="text-gain">Win</span>' : '<span class="text-loss">Loss</span>'}</td>
+      <td class="px-3 py-2 text-right font-mono text-sm text-slate-300" title="Max adverse excursion (manual)">${formatMetaExcursionUsd(meta.mae)}</td>
+      <td class="px-3 py-2 text-right font-mono text-sm text-slate-300" title="Max favorable excursion (manual)">${formatMetaExcursionUsd(meta.mfe)}</td>
+      <td class="px-3 py-2 text-right font-mono ${tradePnlNumber(t) > 0 ? "text-gain" : "text-loss"}">${formatUsd(tradePnlNumber(t))}</td>
+      <td class="px-3 py-2">${tradePnlNumber(t) > 0 ? '<span class="text-gain">Win</span>' : '<span class="text-loss">Loss</span>'}</td>
       <td class="px-2 py-2 no-row-open text-center">
         <button type="button" class="meta-preview-trigger inline-flex items-center justify-center gap-1 min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 px-2 py-2 sm:px-1 sm:py-1 rounded-lg hover:bg-slate-800/80 transition-colors active:bg-slate-800" data-trade-id="${escapeAttr(t.id)}" aria-label="Preview notes, tags, and screenshot">
           <span class="inline-flex h-7 w-7 sm:h-6 sm:min-w-[1.5rem] items-center justify-center rounded text-[10px] font-semibold ${noteClass}">N</span>
@@ -1237,7 +1656,7 @@ function tradeMobileCardHtml(t) {
   const tagClass = hasTags
     ? "bg-violet-500/20 text-violet-200 ring-1 ring-violet-500/35"
     : "bg-slate-800 text-slate-600";
-  const pnlCls = t.pnl > 0 ? "text-gain" : "text-loss";
+  const pnlCls = tradePnlNumber(t) > 0 ? "text-gain" : "text-loss";
   return `
     <article class="trade-mobile-card trade-row rounded-xl border border-slate-800 bg-surface-overlay/50 p-3 cursor-pointer" data-id="${escapeAttr(t.id)}">
       <div class="flex justify-between gap-3 items-start">
@@ -1247,8 +1666,8 @@ function tradeMobileCardHtml(t) {
           <p class="text-xs text-slate-400 mt-1">${escapeHtml(t.openSide)} · <span class="font-mono text-slate-300">${t.maxShares}</span> sh</p>
         </div>
         <div class="text-right shrink-0">
-          <p class="text-lg font-mono font-semibold ${pnlCls}">${formatUsd(t.pnl)}</p>
-          <p class="text-xs mt-0.5">${t.win ? '<span class="text-gain">Win</span>' : '<span class="text-loss">Loss</span>'}</p>
+          <p class="text-lg font-mono font-semibold ${pnlCls}">${formatUsd(tradePnlNumber(t))}</p>
+          <p class="text-xs mt-0.5">${tradePnlNumber(t) > 0 ? '<span class="text-gain">Win</span>' : '<span class="text-loss">Loss</span>'}</p>
         </div>
       </div>
       <div class="mt-3 pt-3 border-t border-slate-800/80 flex flex-wrap items-center gap-2 no-row-open">
@@ -1258,6 +1677,10 @@ function tradeMobileCardHtml(t) {
         <span class="text-sm font-mono text-right min-w-[4.5rem]" data-risk-total="${escapeAttr(t.id)}">${totalInner}</span>
         <span class="text-xs text-slate-500 shrink-0">R:R</span>
         <span class="text-sm font-mono min-w-[3.5rem] text-right" data-rr="${escapeAttr(t.id)}">${riskRewardCellInnerHtml(t, meta)}</span>
+        <span class="text-xs text-slate-500 shrink-0">MAE</span>
+        <span class="text-sm font-mono text-right min-w-[4rem]">${formatMetaExcursionUsd(meta.mae)}</span>
+        <span class="text-xs text-slate-500 shrink-0">MFE</span>
+        <span class="text-sm font-mono text-right min-w-[4rem]">${formatMetaExcursionUsd(meta.mfe)}</span>
       </div>
       <div class="mt-3 flex items-center justify-between no-row-open">
         <button type="button" class="meta-preview-trigger inline-flex items-center gap-2 min-h-[44px] px-3 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800/80 active:bg-slate-800 transition-colors" data-trade-id="${escapeAttr(t.id)}" aria-label="Notes, tags, and screenshot">
@@ -1290,6 +1713,9 @@ async function persistRiskFromInput(tradeId, inputEl) {
       id: tradeId,
       notes: prev.notes ?? null,
       riskPerShare,
+      mae: prev.mae ?? null,
+      mfe: prev.mfe ?? null,
+      maeMfeSource: prev.maeMfeSource ?? null,
       screenshotUrl: prev.screenshotUrl ?? null,
       tags: tradeMetaTagsNormalized(prev),
     });
@@ -1395,6 +1821,28 @@ function accountPageHtml() {
       <div class="rounded-xl border border-slate-800 bg-surface-raised p-5 space-y-4">
         <h2 class="text-sm font-medium text-slate-400">Account</h2>
         <p class="text-sm text-slate-300" id="account-email"></p>
+      </div>
+
+      <div class="rounded-xl border border-slate-800 bg-surface-raised p-5 space-y-4 max-w-xl">
+        <h2 class="text-sm font-medium text-slate-400">Polygon.io (MAE / MFE)</h2>
+        <p class="text-xs text-slate-500 leading-relaxed">
+          Optional Polygon API key for MAE/MFE (minute aggregates). Stored <strong class="text-slate-400">encrypted</strong> on your account; the plain key is only sent when you save here.
+          <a href="https://polygon.io" target="_blank" rel="noopener noreferrer" class="text-accent hover:underline">polygon.io</a>
+        </p>
+        <input type="password" id="polygon-api-key-input" autocomplete="off" spellcheck="false" placeholder="Paste Polygon API key"
+          class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent" />
+        <button type="button" id="polygon-api-key-save"
+          class="w-full py-2 rounded-lg bg-surface-overlay text-slate-200 text-sm border border-slate-600 hover:bg-slate-800/80 transition-colors">
+          Save key to account
+        </button>
+        <p id="polygon-api-key-msg" class="hidden text-xs"></p>
+        <button type="button" id="polygon-fetch-all-mae-mfe"
+          class="w-full py-2 rounded-lg bg-accent/15 text-accent text-sm border border-accent/40 hover:bg-accent/25 transition-colors">
+          Fetch MAE/MFE for trades missing values
+        </button>
+        <p class="text-[11px] text-slate-600 leading-relaxed">
+          Only trades with both MAE and MFE empty; skips manual rows. ~12s between Polygon calls.
+        </p>
       </div>
 
       <div class="rounded-xl border border-slate-800 bg-surface-raised p-5 space-y-4 max-w-xl">
@@ -1511,8 +1959,11 @@ function render() {
   const onAccount = page === Page.Account;
   const onCalendar = page === Page.Calendar;
   const onTradeImport = page === Page.TradeImport;
-  /** Equity curve, statistics (KPIs + sparkline), weekday chart — not on Account / Import. */
+  const onPlots = page === Page.Plots;
+  /** Equity curve, statistics (KPIs + sparkline), weekday chart — not on Account / Import / Plots. */
   const showChartsRow = onDashboard || onCalendar;
+  /** Shared filters: trading account + tag chips — dashboard, calendar, plots. */
+  const showScopeFilters = showChartsRow || onPlots;
 
   const importsScope = importsInDisplayScope(
     state.imports,
@@ -1565,6 +2016,9 @@ function render() {
 
   const dispAcc = tradingAccountById(state.displayAccountId);
   const filesLabelExtra =
+    (state.polygonMaeMfeJob
+      ? ` · MAE/MFE (Polygon): ${state.polygonMaeMfeJob.cur} / ${state.polygonMaeMfeJob.total}`
+      : "") +
     (state.dashboardTagFilters.length > 0
       ? ` · tags: ${state.dashboardTagFilters.map(escapeHtml).join(", ")}`
       : "") +
@@ -1582,7 +2036,7 @@ function render() {
       .join("");
 
   const showTagFilterUi =
-    showChartsRow &&
+    showScopeFilters &&
     (state.trades.length > 0 || state.imports.length > 0);
   const tagFilterWarnHtml = tagWarnNoMatches
     ? `<div class="mb-3 rounded-lg border border-slate-600 bg-slate-800/90 px-3 py-2.5 text-xs text-slate-300 leading-relaxed">
@@ -1597,7 +2051,7 @@ function render() {
   const tagFilterBarHtml = showTagFilterUi
     ? `<section class="rounded-xl border border-slate-700/80 bg-gradient-to-b from-surface-raised to-surface-overlay/40 px-4 py-4 sm:px-5 sm:py-4 mb-6 shadow-lg shadow-black/30 ring-1 ring-slate-800/80" aria-labelledby="dashboard-scope-heading">
         <div class="mb-3">
-          <h3 id="dashboard-scope-heading" class="text-sm font-semibold tracking-tight text-white">Dashboard &amp; calendar scope</h3>
+          <h3 id="dashboard-scope-heading" class="text-sm font-semibold tracking-tight text-white">Trading data scope</h3>
         </div>
         ${tagFilterWarnHtml}
         <div class="flex flex-col gap-3 md:flex-row md:items-stretch md:gap-4">
@@ -1692,6 +2146,8 @@ function render() {
               <option value="riskPerShare"${state.tradeTableSort.column === "riskPerShare" ? " selected" : ""}>Risk/sh</option>
               <option value="totalRisk"${state.tradeTableSort.column === "totalRisk" ? " selected" : ""}>Total risk</option>
               <option value="rr"${state.tradeTableSort.column === "rr" ? " selected" : ""}>R:R</option>
+              <option value="mae"${state.tradeTableSort.column === "mae" ? " selected" : ""}>MAE</option>
+              <option value="mfe"${state.tradeTableSort.column === "mfe" ? " selected" : ""}>MFE</option>
               <option value="pnl"${state.tradeTableSort.column === "pnl" ? " selected" : ""}>P&amp;L</option>
               <option value="result"${state.tradeTableSort.column === "result" ? " selected" : ""}>Result</option>
               <option value="notesMeta"${state.tradeTableSort.column === "notesMeta" ? " selected" : ""}>Notes</option>
@@ -1702,7 +2158,7 @@ function render() {
             </select>
           </div>
           <div class="hidden md:block overflow-x-auto touch-pan-x">
-            <table class="w-full text-sm min-w-[1180px]">
+            <table class="w-full text-sm min-w-[1320px]">
               <thead class="text-left text-slate-500 border-b border-slate-800">
                 <tr>
                   ${tradeTableSortableTh("Date", "dateKey")}
@@ -1713,8 +2169,10 @@ function render() {
                   ${tradeTableSortableTh("Shares", "maxShares", "text-right cursor-help", "Peak shares held during the trade. Cell tooltip: round-turn share volume.")}
                   ${tradeTableSortableTh("Risk/sh $", "riskPerShare", "text-right cursor-help", "Dollar risk per share (e.g. distance to stop). Total risk = this × peak shares.")}
                   ${tradeTableSortableTh("Total risk", "totalRisk", "text-right cursor-help", "Risk/sh × peak shares, when risk/sh is set.")}
-                  ${tradeTableSortableTh("R:R", "rr", "text-right cursor-help", "P&amp;L divided by total risk (1R = amount risked). Shown only when total risk is set.")}
-                  ${tradeTableSortableTh("P&amp;L", "pnl", "text-right")}
+                  ${tradeTableSortableTh("R:R", "rr", "text-right cursor-help", "P&L divided by total risk (1R = amount risked). Shown only when total risk is set.")}
+                  ${tradeTableSortableTh("MAE $", "mae", "text-right cursor-help", "Max adverse excursion — worst move against you while open (manual).")}
+                  ${tradeTableSortableTh("MFE $", "mfe", "text-right cursor-help", "Max favorable excursion — best move in your favor while open (manual).")}
+                  ${tradeTableSortableTh("P&L", "pnl", "text-right")}
                   ${tradeTableSortableTh("Result", "result")}
                   ${tradeTableSortableTh("Notes", "notesMeta", "text-center cursor-help", "Sorts by note text (empty notes sort first in ascending order)")}
                   <th class="px-2 py-2 font-medium text-right w-10 text-slate-500"><span class="sr-only">Options</span></th>
@@ -1745,6 +2203,7 @@ function render() {
       ${navBtn(Page.Account, "Account")}
       ${navBtn(Page.Dashboard, "Dashboard")}
       ${navBtn(Page.Calendar, "Calendar")}
+      ${navBtn(Page.Plots, "Plots")}
       ${navBtn(Page.TradeImport, "Import trades")}
     </aside>
     <div class="flex-1 min-w-0 flex flex-col min-h-screen">
@@ -1772,6 +2231,7 @@ function render() {
       ${onDashboard ? dashboardStatsHtml : ""}
       ${onAccount ? accountPageHtml() : ""}
       ${onTradeImport ? tradeImportPageHtml() : ""}
+      ${onPlots ? buildPlotsExplorerHtml(state.plotLayout) : ""}
 
       ${
         showChartsRow
@@ -1826,6 +2286,7 @@ function render() {
           ${navBtn(Page.Account, "Account")}
           ${navBtn(Page.Dashboard, "Dashboard")}
           ${navBtn(Page.Calendar, "Calendar")}
+          ${navBtn(Page.Plots, "Plots")}
           ${navBtn(Page.TradeImport, "Import trades")}
         </nav>
       </div>
@@ -1852,6 +2313,23 @@ function render() {
             <input type="number" id="modal-risk" step="0.01" min="0" placeholder="e.g. stop distance per share" class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-accent" />
             <p class="text-[11px] text-slate-600 mt-1">Total risk in the table uses peak shares × this value.</p>
           </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-slate-500 mb-1">MAE — max adverse ($)</label>
+              <input type="number" id="modal-mae" step="0.01" min="0" inputmode="decimal" placeholder="Worst move vs you" class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-accent" />
+              <p class="text-[11px] text-slate-600 mt-1">While open: largest move against the position (≥0).</p>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-slate-500 mb-1">MFE — max favorable ($)</label>
+              <input type="number" id="modal-mfe" step="0.01" min="0" inputmode="decimal" placeholder="Best move for you" class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-accent" />
+              <p class="text-[11px] text-slate-600 mt-1">While open: largest move in your favor (≥0).</p>
+            </div>
+          </div>
+          <p id="modal-mae-mfe-source-hint" class="text-[11px] text-slate-500"></p>
+          <button type="button" id="modal-recalc-mae-mfe"
+            class="w-full py-2 rounded-lg border border-slate-600 text-slate-300 text-sm hover:bg-slate-800/80 transition-colors">
+            Recalculate MAE/MFE from Polygon
+          </button>
           <div>
             <label class="block text-xs font-medium text-slate-500 mb-1">Notes</label>
             <textarea id="modal-notes" rows="4" class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent" placeholder="Setup, mistakes, context…"></textarea>
@@ -1920,6 +2398,7 @@ function render() {
 
   bind();
   paintCharts();
+  paintPlots();
   paintCalendar();
   queueMicrotask(() => {
     renderDashboardTagChipsDom();
@@ -2019,11 +2498,27 @@ function compareTradesForTable(a, b, col, dir) {
       if (rrb == null) return -1;
       return asc * ncmp(rra, rrb);
     }
+    case "mae": {
+      const va = metaExcursionSortValue(metaForTradeSort(a.id), "mae");
+      const vb = metaExcursionSortValue(metaForTradeSort(b.id), "mae");
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      return asc * ncmp(va, vb);
+    }
+    case "mfe": {
+      const va = metaExcursionSortValue(metaForTradeSort(a.id), "mfe");
+      const vb = metaExcursionSortValue(metaForTradeSort(b.id), "mfe");
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      return asc * ncmp(va, vb);
+    }
     case "pnl":
-      return asc * ncmp(a.pnl ?? 0, b.pnl ?? 0);
+      return asc * ncmp(tradePnlNumber(a), tradePnlNumber(b));
     case "result": {
-      const va = a.win ? 1 : 0;
-      const vb = b.win ? 1 : 0;
+      const va = tradePnlNumber(a) > 0 ? 1 : 0;
+      const vb = tradePnlNumber(b) > 0 ? 1 : 0;
       return dir === "desc" ? vb - va : va - vb;
     }
     case "notesMeta": {
@@ -2052,7 +2547,9 @@ function tradeTableSortableTh(label, colId, extraClass = "", title = "") {
 }
 
 function escapeAttr(s) {
-  return String(s).replace(/"/g, "&quot;");
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;");
 }
 
 function escapeHtml(s) {
@@ -2147,6 +2644,63 @@ function updateDashboardTagSuggestions(options = {}) {
     )
     .join("");
   box.classList.remove("hidden");
+}
+
+function plotExplorerTagPool() {
+  const importsScope = importsInDisplayScope(
+    state.imports,
+    state.displayAccountId,
+  );
+  const baseTrades = filteredTradesByAccount(
+    state.trades,
+    state.imports,
+    state.displayAccountId,
+  );
+  return mergedDashboardTagOptions(importsScope, baseTrades);
+}
+
+function computePlotTagSuggestionRows(query) {
+  const pool = plotExplorerTagPool();
+  if (!pool.length) return [];
+  const q = String(query ?? "").trim();
+  if (!q) return pool.slice(0, 25);
+  const fuse = new Fuse(
+    pool.map((label) => ({ label: String(label) })),
+    { keys: ["label"], threshold: 0.42, ignoreLocation: true },
+  );
+  return fuse.search(q).slice(0, 25).map((r) => r.item.label);
+}
+
+function updatePlotTagSuggestions(inputEl) {
+  if (!(inputEl instanceof HTMLInputElement)) return;
+  const slot = inputEl.dataset.plotSlot;
+  const ds = inputEl.dataset.dsIndex;
+  if (slot == null || ds == null) return;
+  const box = document.getElementById(`plot-tag-suggestions-${slot}-${ds}`);
+  if (!box) return;
+  const full = String(inputEl.value ?? "");
+  const lastComma = full.lastIndexOf(",");
+  const segment = (lastComma >= 0 ? full.slice(lastComma + 1) : full).trim();
+  const rows = computePlotTagSuggestionRows(segment);
+  if (!rows.length) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  box.innerHTML = rows
+    .map(
+      (label) =>
+        `<button type="button" role="option" data-plot-tag-pick="${escapeAttr(label)}" class="w-full text-left px-3 py-2 text-xs transition-colors hover:bg-slate-800/90 text-slate-200">${escapeHtml(label)}</button>`,
+    )
+    .join("");
+  box.classList.remove("hidden");
+}
+
+function hidePlotTagSuggestions() {
+  document.querySelectorAll(".plot-tag-suggestions").forEach((el) => {
+    el.classList.add("hidden");
+    el.innerHTML = "";
+  });
 }
 
 function renderDashboardTagChipsDom() {
@@ -2330,6 +2884,9 @@ async function hydrateTradeMeta() {
         id,
         notes: r.notes || "",
         riskPerShare: r.risk_per_share ?? null,
+        mae: r.mae ?? null,
+        mfe: r.mfe ?? null,
+        maeMfeSource: r.mae_mfe_source ?? null,
         screenshotUrl: r.screenshot_url ?? null,
         hasScreenshot: !!r.screenshot_url,
         tags: tradeMetaTagsNormalized({ tags: r.tags }),
@@ -2618,12 +3175,13 @@ function bind() {
         dateKey: r.date_key,
         openTs: r.open_ts,
         closeTs: r.close_ts,
-        pnl: r.pnl,
+        pnl: coercePnl(r.pnl),
+        openPrice: r.open_price ?? null,
         maxShares: r.max_shares,
         shareTurnover: r.share_turnover,
         twoWayNotional: r.two_way_notional,
         returnPerDollar: r.return_per_dollar,
-        win: r.pnl > 0,
+        win: coercePnl(r.pnl) > 0,
         importId: r.import_id ?? null,
       }));
       state.balanceSnapshots = (allBal || []).map((r) => ({
@@ -2682,6 +3240,7 @@ function bind() {
         state.calendarMonth = new Date(trades[0].closeTs);
     }
     state.selectedDay = null;
+    void runPolygonMaeMfeBulk(tradeIdsEligibleForPolygonBulk());
     if (isActivePage(Page.TradeImport)) {
         state.page = Page.Dashboard;
     }
@@ -2817,6 +3376,29 @@ function bind() {
     if (e.target.id === "modal") closeModal();
   });
   $("#modal-save")?.addEventListener("click", saveModal);
+  $("#modal-recalc-mae-mfe")?.addEventListener("click", async () => {
+    if (!modalCurrentId) return;
+    const id = modalCurrentId;
+    state.polygonMaeMfeJob = { cur: 1, total: 1 };
+    render();
+    const r = await applyPolygonMaeMfeToTrade(id, { force: true });
+    state.polygonMaeMfeJob = null;
+    if (!r?.ok) {
+      const msg =
+        r?.reason === "no_key"
+          ? "Add a Polygon API key on the Account page first."
+          : r?.reason === "not_eligible"
+            ? "Needs symbol, open/close times, peak position size, two-way notional, P&L, and a close date that is not in the future. Entry price can be inferred only for two-fill round trips when missing from the database—otherwise re-import that CSV once to store VWAP."
+            : r?.reason === "no_bars"
+              ? "No minute bars in range (check symbol or date)."
+              : `Could not compute (${r?.reason ?? "error"}).`;
+      alert(msg);
+      render();
+      return;
+    }
+    openModal(id);
+    render();
+  });
   $("#modal-clear-shot")?.addEventListener("click", clearModalShot);
 
   $("#modal-shot")?.addEventListener("change", async (e) => {
@@ -2834,7 +3416,58 @@ function bind() {
   if (isActivePage(Page.Account)) {
     const emailEl = $("#account-email");
     if (emailEl) emailEl.textContent = localStorage.getItem("user_email") ?? "";
-  
+    const polyIn = $("#polygon-api-key-input");
+    if (polyIn) {
+      polyIn.value = "";
+      polyIn.placeholder = polygonHasKey()
+        ? "Key saved — paste to replace"
+        : "Paste Polygon API key";
+    }
+
+    $("#polygon-api-key-save")?.addEventListener("click", async () => {
+      const raw = $("#polygon-api-key-input")?.value?.trim() ?? "";
+      const msgEl = $("#polygon-api-key-msg");
+      if (!msgEl) return;
+      try {
+        await apiPutPolygonSettings(raw);
+        await refreshPolygonKeyState();
+      } catch (e) {
+        msgEl.textContent = e?.message || "Could not save Polygon key.";
+        msgEl.className = "text-xs text-loss";
+        msgEl.classList.remove("hidden");
+        return;
+      }
+      msgEl.textContent = raw
+        ? "Saved to your account."
+        : "Polygon key removed from your account.";
+      msgEl.className = raw
+        ? "text-xs text-emerald-400/90"
+        : "text-xs text-slate-400";
+      msgEl.classList.remove("hidden");
+      const inp = $("#polygon-api-key-input");
+      if (inp) {
+        inp.value = "";
+        inp.placeholder = polygonHasKey()
+          ? "Key saved — paste to replace"
+          : "Paste Polygon API key";
+      }
+    });
+
+    $("#polygon-fetch-all-mae-mfe")?.addEventListener("click", async () => {
+      if (!polygonHasKey()) {
+        alert("Add and save a Polygon API key first.");
+        return;
+      }
+      const ids = tradeIdsEligibleForPolygonBulk();
+      if (!ids.length) {
+        alert(
+          "No trades to fetch — all loaded trades already have MAE/MFE, are marked manual, or are missing symbol/times/entry price/shares (or close is in the future).",
+        );
+        return;
+      }
+      await runPolygonMaeMfeBulk(ids);
+    });
+
     $("#change-password-btn")?.addEventListener("click", async () => {
       const pwd = $("#new-password").value;
       const confirm = $("#confirm-password").value;
@@ -3088,7 +3721,7 @@ function paintCalendar() {
 
       const centerBlock = has
         ? `<div class="flex flex-col items-center justify-center gap-1 px-1 pb-2 pt-5">
-             <span class="font-mono text-sm font-medium ${pnlClass}">${formatCompactUsd(st.pnl)}</span>
+             <span class="font-mono text-sm font-medium ${pnlClass}">${formatUsd(st.pnl)}</span>
              <span class="text-[11px] leading-tight">
                <span class="text-gain font-medium">${st.wins}W</span>
                <span class="text-slate-600 mx-0.5"> </span>
@@ -3134,7 +3767,7 @@ function paintCalendar() {
         ${dayCells}
         <div class="rounded-xl border border-slate-700/80 bg-slate-900/40 px-3 py-3 grid grid-cols-3 gap-2 text-center">
           <div>
-            <div class="font-mono text-sm font-semibold ${totalCls}">${formatCompactUsd(ws.pnl)}</div>
+            <div class="font-mono text-sm font-semibold ${totalCls}">${formatUsd(ws.pnl)}</div>
             <div class="text-[10px] text-slate-500 mt-0.5">Total</div>
           </div>
           <div>
@@ -3214,6 +3847,20 @@ async function openModal(tradeId) {
         ? String(meta.riskPerShare)
         : "";
   }
+  const mMae = $("#modal-mae");
+  if (mMae) {
+    mMae.value =
+      meta.mae != null && Number.isFinite(Number(meta.mae)) && Number(meta.mae) >= 0
+        ? String(meta.mae)
+        : "";
+  }
+  const mMfe = $("#modal-mfe");
+  if (mMfe) {
+    mMfe.value =
+      meta.mfe != null && Number.isFinite(Number(meta.mfe)) && Number(meta.mfe) >= 0
+        ? String(meta.mfe)
+        : "";
+  }
 
   const prev = $("#modal-preview");
   const img = $("#modal-img");
@@ -3228,6 +3875,20 @@ async function openModal(tradeId) {
     img.src = "";
   }
   $("#modal-shot").value = "";
+  modalMetaSnapshot = {
+    maeStr: $("#modal-mae")?.value ?? "",
+    mfeStr: $("#modal-mfe")?.value ?? "",
+  };
+  const srcHint = $("#modal-mae-mfe-source-hint");
+  if (srcHint) {
+    const s = meta.maeMfeSource;
+    srcHint.textContent =
+      s === "polygon_auto"
+        ? "Source: Polygon (auto)"
+        : s === "manual"
+          ? "Source: manual entry"
+          : "Source: —";
+  }
 }
 
 function closeModal() {
@@ -3239,6 +3900,7 @@ function closeModal() {
   modalTradeTagsDraft = [];
   modalImportEditId = null;
   modalImportTagsDraft = [];
+  modalMetaSnapshot = null;
 }
 
 function openScreenshotLightbox(src) {
@@ -3381,19 +4043,52 @@ function clearModalShot() {
 async function saveModal() {
   if (!modalCurrentId) return;
 
+  const prevMeta = state.tradeMetaById.get(modalCurrentId) || emptyTradeMeta(modalCurrentId);
   const rawRisk = $("#modal-risk")?.value?.trim() ?? "";
+  const rawMae = $("#modal-mae")?.value?.trim() ?? "";
+  const rawMfe = $("#modal-mfe")?.value?.trim() ?? "";
   const tags = normalizeTradeTagList(modalTradeTagsDraft);
+
+  let riskPerShare = prevMeta.riskPerShare ?? null;
+  if (rawRisk === "") riskPerShare = null;
+  else if (rawRisk !== "") {
+    const n = Number(rawRisk);
+    if (Number.isFinite(n) && n >= 0) riskPerShare = n;
+  }
+
+  let mae = prevMeta.mae ?? null;
+  if (rawMae === "") mae = null;
+  else if (rawMae !== "") {
+    const n = Number(rawMae);
+    if (Number.isFinite(n) && n >= 0) mae = n;
+  }
+
+  let mfe = prevMeta.mfe ?? null;
+  if (rawMfe === "") mfe = null;
+  else if (rawMfe !== "") {
+    const n = Number(rawMfe);
+    if (Number.isFinite(n) && n >= 0) mfe = n;
+  }
+
+  const snap = modalMetaSnapshot || { maeStr: "", mfeStr: "" };
+  const maeMfeInputsEdited =
+    rawMae !== snap.maeStr || rawMfe !== snap.mfeStr;
+
+  let maeMfeSource = prevMeta.maeMfeSource ?? null;
+  if (maeMfeInputsEdited) {
+    if (rawMae === "" && rawMfe === "") maeMfeSource = null;
+    else maeMfeSource = "manual";
+  }
+
   const patch = {
     id: modalCurrentId,
     notes: $("#modal-notes").value,
     tags,
+    riskPerShare,
+    mae,
+    mfe,
+    maeMfeSource,
   };
-  if (rawRisk === "") {
-    patch.riskPerShare = null;
-  } else {
-    const n = Number(rawRisk);
-    if (Number.isFinite(n) && n >= 0) patch.riskPerShare = n;
-  }
 
   try {
     if (modalImportEditId) {
@@ -3428,6 +4123,9 @@ async function saveModal() {
       id: modalCurrentId,
       notes: patch.notes,
       riskPerShare: patch.riskPerShare ?? null,
+      mae: patch.mae ?? null,
+      mfe: patch.mfe ?? null,
+      maeMfeSource: patch.maeMfeSource ?? null,
       screenshotUrl,
       tags: patch.tags,
     });
@@ -3437,6 +4135,9 @@ async function saveModal() {
       ...state.tradeMetaById.get(modalCurrentId),
       notes: patch.notes,
       riskPerShare: patch.riskPerShare ?? null,
+      mae: patch.mae ?? null,
+      mfe: patch.mfe ?? null,
+      maeMfeSource: patch.maeMfeSource ?? null,
       screenshotUrl,
       hasScreenshot: !!screenshotUrl,
       tags: patch.tags,
@@ -3447,8 +4148,10 @@ async function saveModal() {
     } else {
       state.screenshotUrls.delete(modalCurrentId);
     }
+    const savedId = modalCurrentId;
     closeModal();
     render();
+    void maybeAutoPolygonAfterModalSave(savedId);
   } catch (err) {
     console.error(err);
     alert(err?.message ? `Save failed: ${err.message}` : "Save failed.");
@@ -3467,6 +4170,51 @@ async function compressImage(blob, maxWidth = 1280, quality = 0.7) {
 
 /** Sidebar nav: one listener on #app so it survives every `render()` (buttons are recreated each time). */
 document.querySelector("#app")?.addEventListener("click", async (event) => {
+  const plotAdd = event.target.closest("[data-plot-dataset-add]");
+  if (plotAdd?.closest("#plots-explorer")) {
+    const slotRoot = plotAdd.closest("[data-plot-slot]");
+    if (slotRoot) {
+      const slotIdx = Number(slotRoot.dataset.plotSlot);
+      const p = state.plotLayout.plots[slotIdx];
+      if (p) {
+        const base =
+          p.chartType === "histogram"
+            ? defaultDatasetHistogram()
+            : defaultDatasetScatter();
+        const datasets = [
+          ...p.datasets,
+          { ...base, label: `Series ${p.datasets.length + 1}` },
+        ];
+        state.plotLayout.plots[slotIdx] = clampPlotSlot(
+          { ...p, datasets },
+          slotIdx,
+        );
+        persistPlotLayout(state.plotLayout);
+        render();
+        return;
+      }
+    }
+  }
+  const plotRm = event.target.closest("[data-plot-dataset-remove]");
+  if (plotRm?.closest("#plots-explorer")) {
+    const slotRoot = plotRm.closest("[data-plot-slot]");
+    const dsRow = plotRm.closest("[data-plot-dataset-row]");
+    if (slotRoot && dsRow) {
+      const slotIdx = Number(slotRoot.dataset.plotSlot);
+      const dsi = Number(dsRow.dataset.dsIndex);
+      const p = state.plotLayout.plots[slotIdx];
+      if (p && p.datasets.length > 1) {
+        const datasets = p.datasets.filter((_, j) => j !== dsi);
+        state.plotLayout.plots[slotIdx] = clampPlotSlot(
+          { ...p, datasets },
+          slotIdx,
+        );
+        persistPlotLayout(state.plotLayout);
+        render();
+        return;
+      }
+    }
+  }
   const sortTh = event.target.closest("th[data-trade-sort]");
   if (sortTh) {
     const col = sortTh.getAttribute("data-trade-sort");
@@ -3539,6 +4287,9 @@ document.querySelector("#app")?.addEventListener("click", async (event) => {
 
 document.querySelector("#app")?.addEventListener("change", (e) => {
   const t = e.target;
+  if (t instanceof HTMLElement && t.closest("#plots-explorer")) {
+    if (handlePlotExplorerChange(e)) return;
+  }
   if (!(t instanceof HTMLSelectElement)) return;
   if (t.id === "dashboard-display-account" || t.id === "display-account-select") {
     state.displayAccountId = (t.value || "").trim();
@@ -3574,6 +4325,61 @@ document.querySelector("#app")?.addEventListener("change", (e) => {
     persistTradeTableSort();
     render();
   }
+});
+
+document.querySelector("#app")?.addEventListener("input", (e) => {
+  const t = e.target;
+  if (t instanceof HTMLElement && t.closest("#plots-explorer")) {
+    if (handlePlotExplorerInput(e)) return;
+  }
+});
+
+document.querySelector("#app")?.addEventListener("focusin", (e) => {
+  const t = e.target;
+  if (
+    t instanceof HTMLElement &&
+    t.hasAttribute("data-plot-tag-input") &&
+    t.closest("#plots-explorer")
+  ) {
+    updatePlotTagSuggestions(t);
+  }
+});
+
+document.querySelector("#app")?.addEventListener("focusout", (e) => {
+  const t = e.target;
+  if (!(t instanceof HTMLElement) || !t.hasAttribute("data-plot-tag-input")) {
+    return;
+  }
+  setTimeout(() => {
+    const ae = document.activeElement;
+    if (ae?.closest?.(".plot-tag-suggestions")) return;
+    if (ae?.closest?.("[data-plot-tag-input]")) return;
+    hidePlotTagSuggestions();
+  }, 120);
+});
+
+document.querySelector("#app")?.addEventListener("mousedown", (e) => {
+  const btn = e.target.closest("[data-plot-tag-pick]");
+  const root = $("#plots-explorer");
+  if (!btn || !root?.contains(btn)) return;
+  e.preventDefault();
+  const label = btn.getAttribute("data-plot-tag-pick") || "";
+  const wrap = btn.closest(".relative");
+  const inp = wrap?.querySelector("[data-plot-tag-input]");
+  if (!(inp instanceof HTMLInputElement)) return;
+  const full = String(inp.value ?? "");
+  const lastComma = full.lastIndexOf(",");
+  const before =
+    lastComma >= 0 ? `${full.slice(0, lastComma).trimEnd()}, ` : "";
+  inp.value = `${before}${label}, `;
+  const slotRoot = inp.closest("[data-plot-slot]");
+  const slotIdx = Number(slotRoot?.dataset.plotSlot);
+  const dsRow = inp.closest("[data-plot-dataset-row]");
+  const dsi = Number(dsRow?.dataset.dsIndex);
+  if (!Number.isFinite(slotIdx) || !Number.isFinite(dsi)) return;
+  syncPlotDataset(slotIdx, dsi, inp);
+  schedulePlotsPersistAndRepaint();
+  hidePlotTagSuggestions();
 });
 
 document.addEventListener("click", onGlobalClickForTradeMenu);
@@ -3770,12 +4576,13 @@ if (!isPasswordRecovery) {
             dateKey: r.date_key,
             openTs: r.open_ts,
             closeTs: r.close_ts,
-            pnl: r.pnl,
+            pnl: coercePnl(r.pnl),
+            openPrice: r.open_price ?? null,
             maxShares: r.max_shares,
             shareTurnover: r.share_turnover,
             twoWayNotional: r.two_way_notional,
             returnPerDollar: r.return_per_dollar,
-            win: r.pnl > 0,
+            win: coercePnl(r.pnl) > 0,
             importId: r.import_id ?? null,
           }));
           state.metrics = computeMetrics(state.trades);
@@ -3803,6 +4610,8 @@ if (!isPasswordRecovery) {
           state.metrics = null;
           state.balanceSnapshots = [];
         }
+        await refreshPolygonKeyState();
+        await migratePolygonKeyLegacyOnce();
         await hydrateTradeMeta();
         await hydrateCalendarDayNotes();
         render();
