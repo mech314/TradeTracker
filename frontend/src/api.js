@@ -48,6 +48,9 @@ export async function apiUpsertMeta(record) {
             trade_id: record.id,
             notes: record.notes ?? null,
             risk_per_share: record.riskPerShare ?? null,
+            mae: record.mae ?? null,
+            mfe: record.mfe ?? null,
+            mae_mfe_source: record.maeMfeSource ?? null,
             screenshot_url: record.screenshotUrl ?? null,
             tags: Array.isArray(record.tags) ? record.tags : [],
         })
@@ -93,9 +96,28 @@ export async function apiUpsertTrades(trades, importId = null) {
             share_turnover: t.shareTurnover,
             two_way_notional: t.twoWayNotional,
             return_per_dollar: t.returnPerDollar,
+            open_price: t.openPrice ?? null,
         })))
     });
     if (!res.ok) throw new Error("Failed to save trades");
+    return res.json();
+}
+
+/** Minute aggregates via backend proxy (Polygon.io). Caller supplies user's Polygon API key. */
+export async function apiPolygonMinuteAggs(symbol, fromDate, toDate, apiKey) {
+    const res = await fetchWithRefresh(`${API}/api/polygon/minute-aggs`, {
+        method: "POST",
+        body: JSON.stringify({
+            symbol,
+            from_date: fromDate,
+            to_date: toDate,
+            api_key: apiKey,
+        }),
+    });
+    if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(errText || `Polygon proxy HTTP ${res.status}`);
+    }
     return res.json();
 }
 

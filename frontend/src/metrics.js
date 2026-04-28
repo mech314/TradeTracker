@@ -1,5 +1,15 @@
 const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+/** Coerce stored/API P&L to a number (avoids string values breaking sums). */
+export function coercePnl(raw) {
+  const v = Number(raw);
+  return Number.isFinite(v) ? v : 0;
+}
+
+export function tradePnlNumber(t) {
+  return coercePnl(t?.pnl);
+}
+
 /**
  * Normalize trade/API `date_key` to `YYYY-MM-DD` so maps line up with calendar
  * cells (`toDateKey`) even when the DB has `2025-4-5` instead of `2025-04-05`.
@@ -19,11 +29,11 @@ export function canonicalDateKey(k) {
 
 export function computeMetrics(trades) {
   const n = trades.length;
-  const wins = trades.filter((t) => t.win);
-  const losses = trades.filter((t) => !t.win);
-  const grossProfit = wins.reduce((s, t) => s + t.pnl, 0);
+  const wins = trades.filter((t) => tradePnlNumber(t) > 0);
+  const losses = trades.filter((t) => tradePnlNumber(t) < 0);
+  const grossProfit = wins.reduce((s, t) => s + tradePnlNumber(t), 0);
   const grossLossAbs = Math.abs(
-    losses.reduce((s, t) => s + t.pnl, 0),
+    losses.reduce((s, t) => s + tradePnlNumber(t), 0),
   );
   let profitFactor = null;
   if (grossLossAbs > 0) profitFactor = grossProfit / grossLossAbs;
@@ -38,13 +48,13 @@ export function computeMetrics(trades) {
     ? rpd.reduce((a, b) => a + b, 0) / rpd.length
     : null;
 
-  const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
+  const totalPnl = trades.reduce((s, t) => s + tradePnlNumber(t), 0);
 
   const byDayPnl = new Map();
   for (const t of trades) {
     const dk = canonicalDateKey(t.dateKey);
     if (!dk) continue;
-    byDayPnl.set(dk, (byDayPnl.get(dk) || 0) + t.pnl);
+    byDayPnl.set(dk, (byDayPnl.get(dk) || 0) + tradePnlNumber(t));
   }
 
   const byWeekday = WD.map((label, day) => ({
@@ -57,8 +67,8 @@ export function computeMetrics(trades) {
   for (const t of trades) {
     const d = new Date(t.closeTs).getDay();
     byWeekday[d].count += 1;
-    byWeekday[d].pnl += t.pnl;
-    if (t.win) byWeekday[d].wins += 1;
+    byWeekday[d].pnl += tradePnlNumber(t);
+    if (tradePnlNumber(t) > 0) byWeekday[d].wins += 1;
   }
 
   return {
