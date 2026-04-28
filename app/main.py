@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+from cryptography.fernet import Fernet
 from pydantic import BaseModel, Field
 from supabase import create_client, Client
 
@@ -26,11 +27,79 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
+# Fernet key for Polygon API keys at rest (generate once: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`).
+_POLYGON_FERNET: Optional[Fernet] = None
+
+
+def _polygon_fernet() -> Fernet:
+    """Lazy-init Fernet from POLYGON_ENCRYPTION_KEY (URL-safe base64 32-byte key)."""
+    global _POLYGON_FERNET
+    if _POLYGON_FERNET is not None:
+        return _POLYGON_FERNET
+    raw = (os.environ.get("POLYGON_ENCRYPTION_KEY") or "").strip()
+    if not raw:
+        raise HTTPException(
+            status_code=503,
+            detail="Server missing POLYGON_ENCRYPTION_KEY — cannot store or use Polygon keys",
+        )
+    try:
+        _POLYGON_FERNET = Fernet(raw.encode("ascii"))
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Invalid POLYGON_ENCRYPTION_KEY: {e}",
+        ) from e
+    return _POLYGON_FERNET
+
+
+def encrypt_polygon_key(plaintext: str) -> str:
+    return _polygon_fernet().encrypt(plaintext.encode("utf-8")).decode("ascii")
+
+
+def decrypt_polygon_key(ciphertext: str) -> str:
+    return _polygon_fernet().decrypt(ciphertext.encode("ascii")).decode("utf-8")
+
+
 # Anon (publishable) key: Auth API (sign-in, get_user(jwt), password reset email).
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 # Service role: PostgREST + Storage bypass RLS. Only use after get_current_user;
 # always scope queries with .eq("user_id", user.id) (or equivalent).
 supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+
+def load_polygon_api_key_for_user(user_id: str) -> Optional[str]:
+    """Decrypt stored Polygon key for user, or None if unset."""
+    uid = str(user_id).strip()
+    if not uid:
+        return None
+    try:
+        res = (
+            supabase_admin.table("user_polygon_keys")
+            .select("key_cipher")
+            .eq("user_id", uid)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        logger.exception("user_polygon_keys select failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not load Polygon settings: {e!s}",
+        ) from e
+    rows = res.data or []
+    if not rows:
+        return None
+    cipher = rows[0].get("key_cipher")
+    if not cipher or not isinstance(cipher, str):
+        return None
+    try:
+        return decrypt_polygon_key(cipher.strip())
+    except Exception as e:
+        logger.exception("polygon key decrypt failed for user %s", uid)
+        raise HTTPException(
+            status_code=500,
+            detail="Stored Polygon key could not be decrypted (did POLYGON_ENCRYPTION_KEY change?). Save your API key again on Account.",
+        ) from e
 
 app = FastAPI(title="TradeTracker")
 
@@ -56,16 +125,22 @@ class TradeMetaUpset(BaseModel):
 
 
 class PolygonMinuteAggsBody(BaseModel):
-    """Proxy to Polygon aggregates API (avoids browser CORS). Caller supplies their API key."""
+    """Proxy to Polygon aggregates API. Server uses stored key unless api_key is sent (legacy)."""
 
     symbol: str
     from_date: str
     to_date: str
-    api_key: str
+    api_key: Optional[str] = None
+
+
+class PolygonSettingsPut(BaseModel):
+    api_key: str = ""
+
 
 class AuthRequest(BaseModel):
     email: str
     password: str
+
 
 class RoundTrip(BaseModel):
     id: str
@@ -171,11 +246,57 @@ async def delete_meta(trade_id: str, user=Depends(get_current_user)):
     res = supabase_admin.table("trade_meta").delete().eq("trade_id", trade_id).eq("user_id", user.id).execute()
     return res.data
 
+
+@app.get("/api/polygon/settings")
+async def get_polygon_settings(user=Depends(get_current_user)):
+    uid = str(user.id)
+    try:
+        res = (
+            supabase_admin.table("user_polygon_keys")
+            .select("user_id")
+            .eq("user_id", uid)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        logger.exception("GET /api/polygon/settings failed")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {"has_key": bool(res.data)}
+
+
+@app.put("/api/polygon/settings")
+async def put_polygon_settings(body: PolygonSettingsPut, user=Depends(get_current_user)):
+    uid = str(user.id)
+    key_plain = (body.api_key or "").strip()
+    if not key_plain:
+        try:
+            supabase_admin.table("user_polygon_keys").delete().eq("user_id", uid).execute()
+        except Exception as e:
+            logger.exception("DELETE polygon key failed")
+            raise HTTPException(status_code=500, detail=str(e)) from e
+        return {"has_key": False}
+    try:
+        cipher = encrypt_polygon_key(key_plain)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("encrypt polygon key failed")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    try:
+        supabase_admin.table("user_polygon_keys").upsert(
+            {"user_id": uid, "key_cipher": cipher},
+        ).execute()
+    except Exception as e:
+        logger.exception("upsert polygon key failed")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {"has_key": True}
+
+
 @app.post("/api/polygon/minute-aggs")
 async def polygon_minute_aggs(body: PolygonMinuteAggsBody, user=Depends(get_current_user)):
     """
-    Forward minute aggregates from Polygon.io. The client's Polygon API key is passed per request
-    (not stored server-side). Used for MAE/MFE calculation.
+    Forward minute aggregates from Polygon.io. Uses the user's saved API key from the database,
+    or body.api_key when provided (legacy).
     """
     sym = body.symbol.strip().upper()
     if not sym:
@@ -186,7 +307,12 @@ async def polygon_minute_aggs(body: PolygonMinuteAggsBody, user=Depends(get_curr
         raise HTTPException(status_code=400, detail="from_date and to_date must be YYYY-MM-DD")
     key = (body.api_key or "").strip()
     if not key:
-        raise HTTPException(status_code=400, detail="api_key required")
+        key = load_polygon_api_key_for_user(user.id) or ""
+    if not key:
+        raise HTTPException(
+            status_code=400,
+            detail="No Polygon API key — save one under Account (Polygon.io section)",
+        )
 
     url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/minute/{fd}/{td}"
     params = {

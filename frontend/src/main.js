@@ -72,6 +72,8 @@ import {
   apiGetDayNotes,
   apiPutDayNote,
   apiPolygonMinuteAggs,
+  apiGetPolygonSettings,
+  apiPutPolygonSettings,
 } from "./api.js";
 import Fuse from "fuse.js";
 
@@ -170,7 +172,7 @@ const LS_DISPLAY_ACCOUNT = "tradetracker_display_account_id";
 const LS_DASHBOARD_TAGS = "tradetracker_dashboard_tags";
 const LS_TRADE_TABLE_SORT = "tradetracker_trades_table_sort";
 const LS_CALENDAR_DAY_NOTES = "tradetracker_calendar_day_notes";
-const LS_POLYGON_API_KEY = "tradetracker_polygon_api_key";
+const LS_POLYGON_API_KEY_LEGACY = "tradetracker_polygon_api_key";
 
 function readCalendarDayNotesFromStorage() {
   try {
@@ -313,6 +315,8 @@ let state = {
   filesLabel: "No files loaded",
   /** Background Polygon MAE/MFE queue: { cur: number, total: number } | null */
   polygonMaeMfeJob: null,
+  /** Server has a Polygon API key saved (GET /api/polygon/settings). */
+  polygonKeyConfigured: false,
   /** Set when CSVs are loaded: used to refresh the status line after deleting trades. */
   fileLoadInfo: null,
   calendarMonth: new Date(),
@@ -1355,7 +1359,6 @@ function weekStats(trades, dateKeys) {
   let profitFactor = null;
   if (grossLossAbs > 0) profitFactor = grossProfit / grossLossAbs;
   else if (grossProfit > 0) profitFactor = Infinity;
-  else profitFactor = Infinity;
 
   const winRate = weekTrades.length ? wins / weekTrades.length : null;
   return { pnl, wins, losses, profitFactor, winRate, tradeCount: weekTrades.length };
@@ -1404,18 +1407,39 @@ function tradeCanPolygonAuto(trade) {
   return true;
 }
 
-function polygonApiKey() {
-  try {
-    return (localStorage.getItem(LS_POLYGON_API_KEY) || "").trim();
-  } catch {
-    return "";
+async function refreshPolygonKeyState() {
+  if (!isLoggedIn()) {
+    state.polygonKeyConfigured = false;
+    return;
   }
+  try {
+    const r = await apiGetPolygonSettings();
+    state.polygonKeyConfigured = !!r?.has_key;
+  } catch {
+    state.polygonKeyConfigured = false;
+  }
+}
+
+async function migratePolygonKeyLegacyOnce() {
+  try {
+    if (state.polygonKeyConfigured) return;
+    const legacy = (localStorage.getItem(LS_POLYGON_API_KEY_LEGACY) || "").trim();
+    if (!legacy) return;
+    await apiPutPolygonSettings(legacy);
+    localStorage.removeItem(LS_POLYGON_API_KEY_LEGACY);
+    await refreshPolygonKeyState();
+  } catch (e) {
+    console.warn("Polygon key migration from localStorage skipped:", e);
+  }
+}
+
+function polygonHasKey() {
+  return !!state.polygonKeyConfigured;
 }
 
 async function applyPolygonMaeMfeToTrade(tradeId, options = {}) {
   const force = options.force === true;
-  const apiKey = polygonApiKey();
-  if (!apiKey) return { ok: false, reason: "no_key" };
+  if (!polygonHasKey()) return { ok: false, reason: "no_key" };
 
   const trade = state.trades.find((x) => x.id === tradeId);
   if (!trade) return { ok: false, reason: "no_trade" };
@@ -1437,7 +1461,7 @@ async function applyPolygonMaeMfeToTrade(tradeId, options = {}) {
   await throttlePolygonBeforeRequest();
   let json;
   try {
-    json = await apiPolygonMinuteAggs(trade.symbol, fromDate, toDate, apiKey);
+    json = await apiPolygonMinuteAggs(trade.symbol, fromDate, toDate);
   } catch (e) {
     console.error(e);
     return { ok: false, reason: "fetch", error: e };
@@ -1476,8 +1500,7 @@ async function applyPolygonMaeMfeToTrade(tradeId, options = {}) {
 }
 
 async function runPolygonMaeMfeBulk(tradeIds) {
-  const key = polygonApiKey();
-  if (!key || !tradeIds?.length) return;
+  if (!polygonHasKey() || !tradeIds?.length) return;
   state.polygonMaeMfeJob = { cur: 0, total: tradeIds.length };
   render();
   for (let i = 0; i < tradeIds.length; i++) {
@@ -1490,7 +1513,7 @@ async function runPolygonMaeMfeBulk(tradeIds) {
 }
 
 function tradeIdsEligibleForPolygonBulk() {
-  if (!polygonApiKey()) return [];
+  if (!polygonHasKey()) return [];
   const out = [];
   for (const t of state.trades) {
     if (!tradeCanPolygonAuto(t)) continue;
@@ -1503,7 +1526,7 @@ function tradeIdsEligibleForPolygonBulk() {
 }
 
 async function maybeAutoPolygonAfterModalSave(tradeId) {
-  if (!tradeId || !polygonApiKey()) return;
+  if (!tradeId || !polygonHasKey()) return;
   const m = state.tradeMetaById.get(tradeId);
   if (!m) return;
   if (m.mae != null || m.mfe != null) return;
@@ -1803,14 +1826,14 @@ function accountPageHtml() {
       <div class="rounded-xl border border-slate-800 bg-surface-raised p-5 space-y-4 max-w-xl">
         <h2 class="text-sm font-medium text-slate-400">Polygon.io (MAE / MFE)</h2>
         <p class="text-xs text-slate-500 leading-relaxed">
-          Optional API key for automatic MAE/MFE from 1‑minute aggregates (requests go through this app&apos;s server; key is not stored on the server). Saved only in <strong class="text-slate-400">this browser</strong>.
+          Optional Polygon API key for MAE/MFE (minute aggregates). Stored <strong class="text-slate-400">encrypted</strong> on your account; the plain key is only sent when you save here.
           <a href="https://polygon.io" target="_blank" rel="noopener noreferrer" class="text-accent hover:underline">polygon.io</a>
         </p>
         <input type="password" id="polygon-api-key-input" autocomplete="off" spellcheck="false" placeholder="Paste Polygon API key"
           class="w-full rounded-lg bg-surface border border-slate-700 px-3 py-2 text-sm font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-accent" />
         <button type="button" id="polygon-api-key-save"
           class="w-full py-2 rounded-lg bg-surface-overlay text-slate-200 text-sm border border-slate-600 hover:bg-slate-800/80 transition-colors">
-          Save key locally
+          Save key to account
         </button>
         <p id="polygon-api-key-msg" class="hidden text-xs"></p>
         <button type="button" id="polygon-fetch-all-mae-mfe"
@@ -1818,7 +1841,7 @@ function accountPageHtml() {
           Fetch MAE/MFE for trades missing values
         </button>
         <p class="text-[11px] text-slate-600 leading-relaxed">
-          Same job as after a CSV import: scans loaded trades, skips manual MAE/MFE and trades already filled, and respects ~12s between Polygon calls. Skips only future-dated closes (bad data).
+          Only trades with both MAE and MFE empty; skips manual rows. ~12s between Polygon calls.
         </p>
       </div>
 
@@ -3396,25 +3419,27 @@ function bind() {
     const polyIn = $("#polygon-api-key-input");
     if (polyIn) {
       polyIn.value = "";
-      polyIn.placeholder = polygonApiKey()
-        ? "Key saved in this browser — paste to replace"
+      polyIn.placeholder = polygonHasKey()
+        ? "Key saved — paste to replace"
         : "Paste Polygon API key";
     }
 
-    $("#polygon-api-key-save")?.addEventListener("click", () => {
+    $("#polygon-api-key-save")?.addEventListener("click", async () => {
       const raw = $("#polygon-api-key-input")?.value?.trim() ?? "";
       const msgEl = $("#polygon-api-key-msg");
       if (!msgEl) return;
       try {
-        if (raw) localStorage.setItem(LS_POLYGON_API_KEY, raw);
-        else localStorage.removeItem(LS_POLYGON_API_KEY);
-      } catch {
-        msgEl.textContent = "Could not access local storage.";
+        await apiPutPolygonSettings(raw);
+        await refreshPolygonKeyState();
+      } catch (e) {
+        msgEl.textContent = e?.message || "Could not save Polygon key.";
         msgEl.className = "text-xs text-loss";
         msgEl.classList.remove("hidden");
         return;
       }
-      msgEl.textContent = raw ? "Saved in this browser." : "Polygon key cleared.";
+      msgEl.textContent = raw
+        ? "Saved to your account."
+        : "Polygon key removed from your account.";
       msgEl.className = raw
         ? "text-xs text-emerald-400/90"
         : "text-xs text-slate-400";
@@ -3422,14 +3447,14 @@ function bind() {
       const inp = $("#polygon-api-key-input");
       if (inp) {
         inp.value = "";
-        inp.placeholder = raw
+        inp.placeholder = polygonHasKey()
           ? "Key saved — paste to replace"
           : "Paste Polygon API key";
       }
     });
 
     $("#polygon-fetch-all-mae-mfe")?.addEventListener("click", async () => {
-      if (!polygonApiKey()) {
+      if (!polygonHasKey()) {
         alert("Add and save a Polygon API key first.");
         return;
       }
@@ -4585,6 +4610,8 @@ if (!isPasswordRecovery) {
           state.metrics = null;
           state.balanceSnapshots = [];
         }
+        await refreshPolygonKeyState();
+        await migratePolygonKeyLegacyOnce();
         await hydrateTradeMeta();
         await hydrateCalendarDayNotes();
         render();

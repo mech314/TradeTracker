@@ -103,20 +103,37 @@ export async function apiUpsertTrades(trades, importId = null) {
     return res.json();
 }
 
-/** Minute aggregates via backend proxy (Polygon.io). Caller supplies user's Polygon API key. */
-export async function apiPolygonMinuteAggs(symbol, fromDate, toDate, apiKey) {
+/** Minute aggregates via backend proxy (Polygon.io). Key comes from server-stored settings. */
+export async function apiPolygonMinuteAggs(symbol, fromDate, toDate) {
     const res = await fetchWithRefresh(`${API}/api/polygon/minute-aggs`, {
         method: "POST",
         body: JSON.stringify({
             symbol,
             from_date: fromDate,
             to_date: toDate,
-            api_key: apiKey,
         }),
     });
     if (!res.ok) {
         const errText = await res.text().catch(() => "");
         throw new Error(errText || `Polygon proxy HTTP ${res.status}`);
+    }
+    return res.json();
+}
+
+export async function apiGetPolygonSettings() {
+    const res = await fetchWithRefresh(`${API}/api/polygon/settings`);
+    if (!res.ok) throw new Error("Failed to load Polygon settings");
+    return res.json();
+}
+
+export async function apiPutPolygonSettings(apiKeyOrEmpty) {
+    const res = await fetchWithRefresh(`${API}/api/polygon/settings`, {
+        method: "PUT",
+        body: JSON.stringify({ api_key: apiKeyOrEmpty ?? "" }),
+    });
+    if (!res.ok) {
+        const t = await res.text().catch(() => "");
+        throw new Error(t || "Failed to save Polygon API key");
     }
     return res.json();
 }
